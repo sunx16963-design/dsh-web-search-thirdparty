@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-thirdparty",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE). Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
   "type": "module",
   "main": "./lib/index.js",

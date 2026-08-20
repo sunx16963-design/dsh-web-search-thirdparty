@@ -25,3 +25,5 @@ First release.
 - 每源用量统计（getSearchStats / resetSearchStats）
 - 修复：缓存 key 并入后处理选项；统计平均延迟改用成功数分母
 - web_fetch 增加 HTML→Markdown 清洗（htmlToMarkdown）
+
+## [0.1.1] - README: add npm install method
