@@ -4,7 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 A third-party web search plugin for DSH (DeepSeek Harness). It replaces the built-in DeepSeek-only search with configurable search engines, gives each engine its own settings, and can fetch full pages so the model can both search and read.
 
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh web`).
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 ## What it does
 
