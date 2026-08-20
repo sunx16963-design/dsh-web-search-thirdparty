@@ -45,15 +45,21 @@ key 可以在设置页直接填写、写入 DSH credentials 服务，或通过�
 
 ## 安装
 
-通过插件管理器使用 `github:` 源安装，或本地构建：
+本插件已发布到 **npm**，推荐直接用插件管理器按包名安装，也可以从 GitHub 安装或本地构建。
 
 ```sh
-# 从 GitHub 安装
+# 方式一（推荐）：从 npm 安装
+dshpm install dsh-web-search-thirdparty --profile web
+# 等价于：npm install dsh-web-search-thirdparty
+```
+
+```sh
+# 方式二：从 GitHub 安装
 dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
 ```sh
-# 本地构建
+# 方式三：本地构建
 git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install

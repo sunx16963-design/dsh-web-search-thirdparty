@@ -45,15 +45,21 @@ Keys can be set in the settings UI, stored in the DSH credentials service, or ex
 
 ## Install
 
-Install through the plugin manager using the `github:` source, or build locally:
+The plugin is published on **npm**; the recommended way is to install it by package name via the plugin manager. You can also install from GitHub or build locally.
 
 ```sh
-# from GitHub
+# Option 1 (recommended): from npm
+dshpm install dsh-web-search-thirdparty --profile web
+# equivalent to: npm install dsh-web-search-thirdparty
+```
+
+```sh
+# Option 2: from GitHub
 dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
 ```sh
-# local build
+# Option 3: local build
 git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install
