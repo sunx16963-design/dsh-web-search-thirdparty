@@ -1,0 +1,23 @@
+# dsh-web-search-thirdparty — bundle patch layer
+#
+# Installed as a bundle, this plugin replaces the built-in DeepSeek-only web
+# search with configurable third-party search engines, and adds a web_fetch
+# (page retrieval) provider so the model can read full pages of a result.
+#
+# 1. Insert this plugin's own host row (provider facade + fetch provider).
+# 2. Point `web.searchProvider` at our facade (replaces deepseek-official
+#    without touching/disabling the built-in plugin), and `web.fetchProvider`
+#    at our retrieval provider.
+# 3. Enable both official web tools: `web_search` and `web_fetch`.
+- insert:
+    - id: web-search-thirdparty
+      name: 'dsh-web-search-thirdparty'
+- id: web
+  config:
+    searchProvider: web-search-thirdparty
+    fetchProvider: web-search-thirdparty-fetch
+- id: tool-web
+  config:
+    search: true
+    fetch: true
+  disabled: false
