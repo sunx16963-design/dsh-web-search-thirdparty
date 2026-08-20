@@ -16,6 +16,7 @@ import { WebError } from '@deepseek-ai/dsh-web'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import { lookup as dnsLookup } from 'node:dns/promises'
 
 /** Stable provider id registered on `ctx.web` (must match cordis.patch.yml `web.searchProvider`). */
 export const PROVIDER_ID = 'web-search-thirdparty'
@@ -57,6 +58,18 @@ export interface Config {
   cacheEnabled: boolean
   /** 缓存有效期（ms）。 */
   cacheTtlMs: number
+  /** 合并模式的最大并发 provider 数。 */
+  maxProviderConcurrency: number
+  /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
+  circuitEnabled: boolean
+  /** 连续失败多少次触发熔断。 */
+  circuitFailureLimit: number
+  /** 熔断冷却时长（ms）。 */
+  circuitCooldownMs: number
+  /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
+  fetchAllowPrivate: boolean
+  /** 是否记录每源用量统计。 */
+  statsEnabled: boolean
   /** 抓取最大字符数。 */
   fetchMaxBodyChars: number
   /** 抓取超时（ms）。 */
@@ -122,6 +135,18 @@ export const Config = z.object({
   cacheEnabled: z.boolean().default(true),
   /** 缓存有效期（ms）。 */
   cacheTtlMs: z.number().step(1000).min(1000).max(86400000).default(60000),
+  /** 合并模式的最大并发 provider 数。 */
+  maxProviderConcurrency: z.number().step(1).min(1).max(6).default(3),
+  /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
+  circuitEnabled: z.boolean().default(true),
+  /** 连续失败多少次触发熔断。 */
+  circuitFailureLimit: z.number().step(1).min(1).max(20).default(3),
+  /** 熔断冷却时长（ms）。 */
+  circuitCooldownMs: z.number().step(1000).min(1000).max(600000).default(15000),
+  /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
+  fetchAllowPrivate: z.boolean().default(false),
+  /** 是否记录每源用量统计。 */
+  statsEnabled: z.boolean().default(true),
   /** 抓取最大字符数。 */
   fetchMaxBodyChars: z.number().step(500).min(500).max(500000).default(60000),
   /** 抓取超时（ms）。 */
@@ -606,6 +631,96 @@ function cacheSet(key: string, result: SearchResult, ttlMs: number): void {
   cacheStore.set(key, { at: Date.now(), result })
 }
 
+/** 近并发请求防击穿：同 key 进行中的请求共享一个 promise。 */
+const inflight = new Map<string, Promise<SearchResult>>()
+
+async function cacheGetOrCompute(key: string, cfg: Config, compute: () => Promise<SearchResult>): Promise<SearchResult> {
+  if (cfg.cacheEnabled) {
+    const hit = cacheGet(key, cfg.cacheTtlMs)
+    if (hit !== undefined) return hit
+    const running = inflight.get(key)
+    if (running !== undefined) return running
+  }
+  const task = (async () => {
+    const result = await compute()
+    if (cfg.cacheEnabled) cacheSet(key, result, cfg.cacheTtlMs)
+    return result
+  })()
+  if (cfg.cacheEnabled) {
+    inflight.set(key, task)
+    try { return await task } finally { inflight.delete(key) }
+  }
+  return task
+}
+
+/** 带并发上限的并行执行：items 按序，fn 并发数 ≤ limit，结果保持原顺序。 */
+async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  if (limit <= 1) {
+    const out: R[] = []
+    for (const it of items) out.push(await fn(it))
+    return out
+  }
+  const out: R[] = new Array(items.length)
+  let i = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const idx = i++
+      if (idx >= items.length) break
+      out[idx] = await fn(items[idx])
+    }
+  })
+  await Promise.all(workers)
+  return out
+}
+
+// ── 每源熔断（临时健康检查）──
+const circuitState = new Map<string, { failures: number; openUntil: number }>()
+
+function circuitOpen(cfg: Config, id: string): boolean {
+  if (!cfg.circuitEnabled) return false
+  const st = circuitState.get(id)
+  return st !== undefined && st.openUntil !== undefined && Date.now() < st.openUntil
+}
+
+function circuitMarkSuccess(id: string): void {
+  circuitState.delete(id)
+}
+
+function circuitMarkFailure(cfg: Config, id: string): void {
+  if (!cfg.circuitEnabled) return
+  const st = circuitState.get(id) ?? { failures: 0, openUntil: 0 }
+  st.failures += 1
+  if (st.failures >= cfg.circuitFailureLimit) {
+    st.openUntil = Date.now() + cfg.circuitCooldownMs
+    st.failures = 0
+  }
+  circuitState.set(id, st)
+}
+
+// ── 每源用量统计 ──
+const searchStats = new Map<string, { requests: number; errors: number; latencyMs: number; lastError?: string }>()
+
+function recordStat(id: string, ok: boolean, latencyMs: number, errMessage?: string): void {
+  const st = searchStats.get(id) ?? { requests: 0, errors: 0, latencyMs: 0 }
+  st.requests += 1
+  if (ok) st.latencyMs += latencyMs
+  else { st.errors += 1; st.lastError = errMessage ?? st.lastError }
+  searchStats.set(id, st)
+}
+
+export function getSearchStats(): Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> {
+  const out: Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> = {}
+  for (const [id, st] of searchStats) {
+    out[id] = { requests: st.requests, errors: st.errors, avgLatencyMs: st.requests > 0 ? Math.round(st.latencyMs / Math.max(1, st.requests - st.errors)) : 0, ...(st.lastError !== undefined ? { lastError: st.lastError } : {}) }
+  }
+  return out
+}
+
+export function resetSearchStats(): void {
+  searchStats.clear()
+}
+
+
 /** 同步判断某 provider 是否“可用”（key 是否已配）。searxng 恒可用。 */
 function hasConfiguredKey(cfg: Config, id: string): boolean {
   switch (id) {
@@ -719,10 +834,6 @@ export class ThirdPartySearchProvider implements SearchProvider {
     }
     const maxResults = Math.min(request.maxResults ?? r.cfg.maxResults, r.cfg.maxResults)
     const cacheKey = cacheKeyOf(r.cfg, request.query, maxResults)
-    if (r.cfg.cacheEnabled && signal?.aborted !== true) {
-      const hit = cacheGet(cacheKey, r.cfg.cacheTtlMs)
-      if (hit !== undefined) return hit
-    }
 
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(new Error('search timeout after ' + r.cfg.timeoutMs + 'ms')), r.cfg.timeoutMs)
@@ -730,52 +841,81 @@ export class ThirdPartySearchProvider implements SearchProvider {
     signal?.addEventListener('abort', onAbort, { once: true })
 
     try {
-      const chain = buildProviderChain(r.cfg, registry as ProviderRegistry)
-      const targets = r.cfg.mergeResults ? chain.slice(0, Math.max(1, r.cfg.maxProviderQueries)) : chain
-      const sources: SearchSource[] = []
-      const seen = new Set<string>()
-      let content: string | undefined
-      const failures: string[] = []
+      const compute = async (): Promise<SearchResult> => {
+        const chain = buildProviderChain(r.cfg, registry as ProviderRegistry)
+        let targets = r.cfg.mergeResults ? chain.slice(0, Math.max(1, r.cfg.maxProviderQueries)) : chain
+        // 熔断：跳过处于冷却期且非主源的 provider（主源仍尝试，以便冷却恢复后自愈）
+        const primary = r.cfg.provider
+        targets = targets.filter((id) => id === primary || !circuitOpen(r.cfg, id))
 
-      for (const id of targets) {
-        const adapter = registry.sources.get(id)
-        if (adapter === undefined) continue
-        try {
-          const result = await adapter.search(
-            { query: request.query, maxResults, config: r.cfg as unknown as Record<string, unknown> },
-            controller.signal,
-          )
-          for (const src of result.sources) {
-            if (!src.url || seen.has(src.url)) continue
-            seen.add(src.url)
-            sources.push({ ...src })
+        const failures: Array<{ id: string; msg: string }> = []
+        const sources: SearchSource[] = []
+        const seen = new Set<string>()
+        let content: string | undefined
+
+        const runOne = async (id: string): Promise<{ sources: SearchSourceItem[]; content?: string }> => {
+          const adapter = registry.sources.get(id)
+          if (adapter === undefined) return { sources: [] }
+          const started = Date.now()
+          try {
+            const result = await adapter.search(
+              { query: request.query, maxResults, config: r.cfg as unknown as Record<string, unknown> },
+              controller.signal,
+            )
+            circuitMarkSuccess(id)
+            if (r.cfg.statsEnabled) recordStat(id, true, Date.now() - started)
+            return { sources: result.sources ?? [], content: result.content }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error)
+            circuitMarkFailure(r.cfg, id)
+            if (r.cfg.statsEnabled) recordStat(id, false, Date.now() - started, msg)
+            failures.push({ id, msg })
+            return { sources: [] }
           }
-          if (content === undefined && result.content !== undefined) content = result.content
-          if (!r.cfg.mergeResults && sources.length > 0) break
-        } catch (error) {
-          failures.push(id + ':' + (error instanceof Error ? error.message : String(error)))
         }
+
+        if (r.cfg.mergeResults) {
+          const collected = await runWithConcurrency(targets, r.cfg.maxProviderConcurrency, runOne)
+          for (const c of collected) {
+            for (const src of c.sources) {
+              if (!src.url || seen.has(src.url)) continue
+              seen.add(src.url)
+              sources.push({ ...src })
+            }
+            if (content === undefined && c.content !== undefined) content = c.content
+          }
+        } else {
+          for (const id of targets) {
+            const c = await runOne(id)
+            for (const src of c.sources) {
+              if (!src.url || seen.has(src.url)) continue
+              seen.add(src.url)
+              sources.push({ ...src })
+            }
+            if (content === undefined && c.content !== undefined) content = c.content
+            if (sources.length > 0) break
+          }
+        }
+
+        if (sources.length === 0 && failures.length > 0) {
+          throw new WebError('web-search-thirdparty: 所有可用搜索源均失败 — ' + failures[0].id + ':' + failures[0].msg, 'WEB_PROVIDER_ERROR')
+        }
+
+        let cleaned = sources.slice(0, maxResults).map((src) => ({
+          ...src,
+          ...(src.snippet !== undefined ? { snippet: cleanSnippet(src.snippet, r.cfg.snippetMaxLength) } : {}),
+        }))
+        cleaned = dedupeByDomain(cleaned, r.cfg.maxPerDomain)
+        if (r.cfg.relevanceSort) cleaned = sortByRelevance(cleaned, request.query)
+
+        return {
+          sources: cleaned,
+          ...(content !== undefined ? { content } : {}),
+          truncated: false,
+        } as SearchResult
       }
 
-      if (sources.length === 0 && failures.length > 0) {
-        throw new WebError('web-search-thirdparty: 所有可用搜索源均失败 — ' + failures[0], 'WEB_PROVIDER_ERROR')
-      }
-
-      let cleaned = sources.slice(0, maxResults).map((src) => ({
-        ...src,
-        ...(src.snippet !== undefined ? { snippet: cleanSnippet(src.snippet, r.cfg.snippetMaxLength) } : {}),
-      }))
-      // 域名去重 + 相关度排序
-      cleaned = dedupeByDomain(cleaned, r.cfg.maxPerDomain)
-      if (r.cfg.relevanceSort) cleaned = sortByRelevance(cleaned, request.query)
-
-      const result: SearchResult = {
-        sources: cleaned,
-        ...(content !== undefined ? { content } : {}),
-        truncated: false,
-      }
-      if (r.cfg.cacheEnabled) cacheSet(cacheKey, result, r.cfg.cacheTtlMs)
-      return result
+      return await cacheGetOrCompute(cacheKey, r.cfg, compute)
     } finally {
       clearTimeout(timeout)
       signal?.removeEventListener('abort', onAbort)
@@ -893,6 +1033,47 @@ function registerTestRoute(ctx: AppContext, current: () => Config): void {
   })
 }
 
+
+function isPrivateIp(addr: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr)
+  if (v4 !== null) {
+    const a = Number(v4[1]); const b = Number(v4[2]); const c = Number(v4[3]); const d = Number(v4[4])
+    if (a === 10) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 127) return true
+    if (a === 169 && b === 254) return true
+    if (a === 100 && b >= 64 && b <= 127) return true
+    return false
+  }
+  const lower = addr.toLowerCase()
+  if (lower === '::1' || lower === '::') return true
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true
+  if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true
+  if (lower.startsWith('::ffff:')) return isPrivateIp(lower.slice(7))
+  return false
+}
+
+function isPrivateName(host: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, '')
+  if (h === 'localhost' || h.endsWith('.localhost')) return true
+  if (h === 'metadata.google.internal' || h === 'instance-data') return true
+  if (/^\d|^[0-9a-f:]+$/i.test(h)) return isPrivateIp(h)
+  return false
+}
+
+async function assertPublicUrl(url: URL, cfg: Config): Promise<void> {
+  if (cfg.fetchAllowPrivate) return
+  const host = url.hostname
+  if (isPrivateName(host)) throw new WebError('blocked private / loopback address: ' + host, 'WEB_FETCH_BLOCKED_PRIVATE')
+  try {
+    const addrs = await dnsLookup(host, { all: true })
+    for (const a of addrs) if (isPrivateIp(a.address)) throw new WebError('blocked private network address: ' + a.address + ' (' + host + ')', 'WEB_FETCH_BLOCKED_PRIVATE')
+  } catch (error) {
+    if (error instanceof WebError) throw error
+  }
+}
+
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */
 export class LocalFetchProvider implements WebFetchProvider {
   readonly id = FETCH_PROVIDER_ID
@@ -913,6 +1094,7 @@ export class LocalFetchProvider implements WebFetchProvider {
       throw new WebError(`unsupported protocol "${url.protocol}" — only http(s) allowed`, 'WEB_PROVIDER_ERROR')
     }
     const r = this.resolveOptions()
+    await assertPublicUrl(url, r.cfg)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(new Error(`web fetch timeout after ${r.cfg.fetchTimeoutMs}ms`)), r.cfg.fetchTimeoutMs)
     const onAbort = () => controller.abort(signal?.reason)

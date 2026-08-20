@@ -40,6 +40,18 @@ export interface Config {
     cacheEnabled: boolean;
     /** 缓存有效期（ms）。 */
     cacheTtlMs: number;
+    /** 合并模式的最大并发 provider 数。 */
+    maxProviderConcurrency: number;
+    /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
+    circuitEnabled: boolean;
+    /** 连续失败多少次触发熔断。 */
+    circuitFailureLimit: number;
+    /** 熔断冷却时长（ms）。 */
+    circuitCooldownMs: number;
+    /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
+    fetchAllowPrivate: boolean;
+    /** 是否记录每源用量统计。 */
+    statsEnabled: boolean;
     /** 抓取最大字符数。 */
     fetchMaxBodyChars: number;
     /** 抓取超时（ms）。 */
@@ -146,6 +158,13 @@ export declare function dedupeByDomain<T extends SearchSource>(sources: T[], lim
 export declare function queryTokens(query: string): string[];
 /** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
 export declare function sortByRelevance(sources: SearchSource[], query: string): SearchSource[];
+export declare function getSearchStats(): Record<string, {
+    requests: number;
+    errors: number;
+    avgLatencyMs: number;
+    lastError?: string;
+}>;
+export declare function resetSearchStats(): void;
 /** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
 export declare const BUILTIN_LABELS: Record<string, string>;
 /** 归一化的一条搜索结果（供自定义源返回）。 */

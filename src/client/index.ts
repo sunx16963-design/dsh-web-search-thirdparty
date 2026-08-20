@@ -46,6 +46,7 @@ const RESET_FIELDS = [
   'googleApiKey', 'googleApiKeyEnv', 'googleSearchEngineId', 'googleSearchEngineIdEnv', 'googleLanguage',
   'snippetMaxLength', 'mergeResults', 'fallbackProviders', 'maxProviderQueries',
   'maxPerDomain', 'relevanceSort', 'cacheEnabled', 'cacheTtlMs',
+  'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs', 'fetchAllowPrivate', 'statsEnabled',
   'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
 ]
 
