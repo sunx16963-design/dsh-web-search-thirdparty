@@ -1,77 +1,101 @@
 # dsh-web-search-thirdparty
 
-> 🇨🇳 **中文** · [**English README**](./README.md) · ⚙️ **为 DSH 构建** — [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+[English](./README.md) | 简体中文
 
-DSH（DeepSeek Harness）网络搜索的门面插件：替换 dsh 自带的“仅官方 DeepSeek”搜索，
-支持在设置里配置第三方搜索引擎，并自带抓取（web_fetch）provider，让模型既能“搜”
-又能“读”全文。以 **bundle 插件**安装后，自动接好 `web_search` / `web_fetch` 工具并带独立设置页。
+为 DSH（DeepSeek Harness）开发的第三方网页搜索插件。它用可配置的搜索引擎替换 dsh 自带的“仅官方 DeepSeek”搜索，为每个引擎提供独立设置，并能抓取网页全文，让模型既能搜索也能阅读。
 
-## ✨ 功能
-- 6 个内置引擎：SearXNG · Tavily · Serper · Brave · Bing · Google CSE
-- **开放 provider 注册 API**：其它插件可挂自己的搜索源
-- 设置页内置**每源高级参数**（语言/地区/市场/搜索深度/safesearch…）
-- 每源**自定义 endpoint/baseURL**（自建 SearXNG / 内网代理）
-- **自定义请求头** + **网络级重试·指数退避**
-- 可用源**自动降级**、可开**多源合并去重**
-- **域名去重** + **相关度排序** + 条数/超时控制
-- **TTL 结果缓存**（省 key 额度）
-- **测试连接**：耗时 + 条数 + 首条标题
-- **web_fetch 抓取**（限长）
-- 浏览器设置 UI，**适配深浅主题**（原生控件 + color-scheme）
+基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh web`）开发。
 
-> 替代内置搜索时**不动、不禁用** DeepSeek provider，只把 `web.searchProvider`
-> 指向本门面，因此不会触发 `WEB_PROVIDER_AMBIGUOUS`。
+## 插件做什么
 
-## 🔌 引擎
+DSH 自带的网页搜索只能对接官方 DeepSeek 接口。这个插件让你改用自己想要的搜索源——自建 SearXNG、Tavily、Bing、Brave、Serper 或 Google。在设置页里选引擎、填 key、调参数即可，不需要改代码。
+
+## 主要功能
+
+- 六个内置引擎，统一入口：SearXNG、Tavily、Serper、Brave、Bing、Google CSE。
+- 浏览器设置页：选择供应商、填写 API key、按引擎配置参数（语言、地区、市场、搜索深度、安全级别）。
+- 每个提供商可配置自定义 endpoint / baseURL（自建 SearXNG、内网代理）。
+- 自定义请求头，以及带退避的网络重试。
+- 提供商失败时自动降级；可选多源合并并去重。
+- 域名去重、相关度排序、结果条数与超时控制。
+- TTL 结果缓存，避免重复请求、节省配额。
+- “测试连接”功能，反馈延迟、结果条数与首条标题。
+- `web_fetch` 抓取 provider，便于模型阅读全文。
+- 开放 provider 注册 API，其它插件可挂载自己的搜索源。
+
+## 支持的引擎
+
 | id | 服务 | 需要 key | 配置 |
-|---|---|---|---|
-| `searxng`（默认） | SearXNG 自托管/公共 | 否 | `searxngBaseURL` |
+| --- | --- | --- | --- |
+| `searxng`（默认） | SearXNG（自托管 / 公共） | 否 | `searxngBaseURL` |
 | `tavily` | Tavily | 是 | `tavilyApiKey` / `TAVILY_API_KEY` |
-| `serper` | Google SERP | 是 | `serperApiKey` / `SERPER_API_KEY` |
+| `serper` | Serper（Google SERP） | 是 | `serperApiKey` / `SERPER_API_KEY` |
 | `brave` | Brave Search | 是 | `braveApiKey` / `BRAVE_API_KEY` |
 | `bing` | Bing Web Search | 是 | `bingApiKey` / `BING_SEARCH_API_KEY` |
-| `google-cse` | Google CSE | 是（key + cx） | `googleApiKey` + `googleSearchEngineId` |
+| `google-cse` | Google 自定义搜索 | 是（key + cx） | `googleApiKey` + `googleSearchEngineId` |
 
-key 三选一：设置页直接填 / 写进 dsh credentials 服务 / 导出环境变量。
+key 可以在设置页直接填写、写入 DSH credentials 服务，或通过环境变量导出。
 
-## 🚀 安装
-```bash
-# 走插件管理器（含质量门禁 + 回滚）
+## 安装
+
+通过插件管理器使用 `github:` 源安装，或本地构建：
+
+```sh
+# 从 GitHub 安装
 dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
-本地构建则：`npm install && npm run build`，再 `dshpm install /本地路径 --profile web`。
-装完**重启 web 一次**让设置页 UI 生效。
 
-## 🧰 开发
-```bash
+```sh
+# 本地构建
+git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
+cd dsh-web-search-thirdparty
 npm install
-npm run build:host     # tsc
-npm run build:client   # tsdown
+npm run build
+dshpm install /本地路径/dsh-web-search-thirdparty --profile web
+```
+
+安装后重启 `dsh web`，设置页才会出现。
+
+## 开发者
+
+```sh
+npm install
+npm run build:host     # 编译宿主插件（lib/index.js）
+npm run build:client   # 打包浏览器 UI（lib/client.js）
+npm run typecheck
+npm test
 npm pack
 ```
-全新 clone 只用公共 npm 包即可构建（`@deepseek-ai/*` 的编译期类型由仓库自带
-ambient 垫片提供；运行期由 DSH 提供真 peer 包）。
 
-### 开放 API：注册自定义搜索源
+全新 clone 只用公共 npm 包即可构建。`@deepseek-ai/*` 的编译期类型由仓库自带的 ambient 垫片提供；运行期仍由 DSH 提供真实包。
+
+### Provider API
+
+其它 Cordis 插件注入 `web-search-thirdparty` 服务即可注册自己的搜索源：
+
 ```ts
 export const inject = ['web-search-thirdparty']
+
 function apply(ctx) {
   ctx.get('web-search-thirdparty').register({
-    id: 'my-source', label: 'My Source',
+    id: 'my-source',
+    label: 'My Source',
     search: async ({ query, maxResults, config }, signal) => ({
-      sources: [{ url: 'https://…', title: '…', snippet: '…' }],
+      sources: [{ url, title, snippet }],
       content: '可选 answer',
     }),
   })
 }
 ```
 
-## ⚙️ 配置（settings 分区 `dsh-web-search-thirdparty`）
+## 配置
+
+设置存放在 `dsh-web-search-thirdparty` 分区下：
+
 ```yaml
 dsh-web-search-thirdparty:
   provider: searxng
-  searxngBaseURL: https://searx.be   # 或自建实例，如 http://127.0.0.1:8666
-  tavilyApiKey: ""
+  searxngBaseURL: https://searx.be   # 或自建实例
   maxResults: 8
   mergeResults: false
   maxPerDomain: 2
@@ -80,8 +104,8 @@ dsh-web-search-thirdparty:
   cacheTtlMs: 60000
   retryCount: 1
   retryBackoffMs: 250
-  extraHeadersJson: '{}'
 ```
 
-## 📄 许可证
+## 许可证
+
 BSD-3-Clause。见 [LICENSE](LICENSE)。

@@ -1,93 +1,77 @@
 # dsh-web-search-thirdparty
 
-> 🌏 **English** · [**中文文档**](./README.zh-CN.md) · ⚙️ **Built for DSH** — [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
+English | [简体中文](./README.zh-CN.md)
 
-A DSH (DeepSeek Harness) web-search **provider facade**: it replaces the built-in
-DeepSeek-only search with configurable third-party search engines, gives every
-source its own settings UI, and adds a web-fetch (page retrieval) provider so the
-model can both *search* and *read* full pages.
+A third-party web search plugin for DSH (DeepSeek Harness). It replaces the built-in DeepSeek-only search with configurable search engines, gives each engine its own settings, and can fetch full pages so the model can both search and read.
 
-Works as a **bundle plugin** for DSH web profiles: one install wires up the
-search seam, the `web_search` / `web_fetch` tools, and a friendly settings page.
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh web`).
 
----
+## What it does
 
-## ✨ Features
+DSH's built-in web search only talks to the official DeepSeek API. This plugin lets you use the search provider you actually want — a self-hosted SearXNG, Tavily, Bing, Brave, Serper, or Google. You pick the engine and configure it from the browser settings page, no code needed.
 
-- **6 built-in engines** behind one facade: SearXNG · Tavily · Serper · Brave · Bing · Google CSE
-- **Open provider-registration API** — any other Cordis plugin can register its own search source
-- **Per-provider advanced params** in the settings UI (language / country / market / search_depth / safesearch / …)
-- **Custom endpoint / baseURL** per provider (self-hosted SearXNG, internal/proxy mirrors)
-- **Custom request headers** + **network retry with exponential backoff**
-- **Auto-fallback** across usable sources, and **merge mode** (multi-source, de-duplicated)
-- **Domain de-dup** + **relevance sorting** + result-count/timeout control
-- **TTL result cache** (no repeated upstream calls → saves key quota)
-- **Test connection** with latency / result count / first title
-- **web_fetch** provider (limited body size) so `web_fetch` works too
-- Settings toggle UI that works from the browser, **theme-friendly** (native controls + `color-scheme`)
+## Features
 
-> Replaces the built-in search **without touching/disabling** the DeepSeek provider:
-> it only points `web.searchProvider` at this facade, so no `WEB_PROVIDER_AMBIGUOUS`.
+- Six built-in engines behind one facade: SearXNG, Tavily, Serper, Brave, Bing, Google CSE.
+- A browser settings page: choose the provider, enter the API key, and tune per-engine options (language, market, search depth, safety level).
+- A custom endpoint / baseURL per provider (self-hosted SearXNG, internal proxy).
+- Custom request headers and automatic retry with backoff.
+- Automatic fallback when a provider fails, and optional multi-source merge with deduplication.
+- Domain deduplication, relevance sorting, and result-count / timeout control.
+- A TTL result cache to avoid repeated upstream calls and save quota.
+- A "test connection" action that reports latency, result count, and the first title.
+- A `web_fetch` provider so the model can read full pages.
+- An open provider-registration API for other plugins to add their own search source.
 
----
+## Supported engines
 
-## 🔌 Supported engines
-
-| id | service | key? | config |
-|---|---|---|---|
-| `searxng` (default) | SearXNG (self-hosted / public) | no | `searxngBaseURL` |
+| id | service | API key | config |
+| --- | --- | --- | --- |
+| `searxng` (default) | SearXNG (self-hosted or public) | no | `searxngBaseURL` |
 | `tavily` | Tavily | yes | `tavilyApiKey` / `TAVILY_API_KEY` |
-| `serper` | Google SERP | yes | `serperApiKey` / `SERPER_API_KEY` |
+| `serper` | Serper (Google SERP) | yes | `serperApiKey` / `SERPER_API_KEY` |
 | `brave` | Brave Search | yes | `braveApiKey` / `BRAVE_API_KEY` |
 | `bing` | Bing Web Search | yes | `bingApiKey` / `BING_SEARCH_API_KEY` |
-| `google-cse` | Google CSE | yes (key + cx) | `googleApiKey` + `googleSearchEngineId` |
+| `google-cse` | Google Custom Search | yes (key + cx) | `googleApiKey` + `googleSearchEngineId` |
 
-Keys may be set as a literal in the settings UI, stored in the DSH credentials
-service, or exported as an environment variable (each engine also has an `*Env`
-field to name its env var).
+Keys can be set in the settings UI, stored in the DSH credentials service, or exported as environment variables.
 
----
+## Install
 
-## 🚀 Install
+Install through the plugin manager using the `github:` source, or build locally:
 
-### From source clone
-```bash
-# via the plugin manager (runs the quality gate + rollback)
+```sh
+# from GitHub
 dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
-### Local build & install
-```bash
+```sh
+# local build
 git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install
-npm run build          # produces lib/
-# then point the plugin manager at this directory
+npm run build
 dshpm install /path/to/dsh-web-search-thirdparty --profile web
 ```
 
-After install, **restart the web profile** once so the client settings page loads.
+Restart `dsh web` after installing so the settings page appears.
 
----
+## Developer
 
-## 🧰 Developer
-
-```bash
+```sh
 npm install
-npm run build:host     # tsc  → lib/index.js
-npm run build:client   # tsdown → lib/client.js
+npm run build:host     # compiles the host plugin (lib/index.js)
+npm run build:client   # bundles the browser UI (lib/client.js)
 npm run typecheck
-npm pack               # release artifact
+npm test
+npm pack
 ```
 
-A fresh clone builds with only public npm packages (the `@deepseek-ai/*` platform
-symbols are provided by ambient type shims for compile-time; at runtime DSH
-supplies the real peer packages).
+A fresh clone builds with only public npm packages. The `@deepseek-ai/*` platform symbols are covered by ambient type shims at compile time; at runtime DSH provides the real packages.
 
-### Register a custom search source (open API)
+### Provider API
 
-Any other Cordis plugin may inject the `web-search-thirdparty` service and register
-an adapter:
+Other Cordis plugins can register a search source by injecting the `web-search-thirdparty` service:
 
 ```ts
 export const inject = ['web-search-thirdparty']
@@ -96,37 +80,32 @@ function apply(ctx) {
   ctx.get('web-search-thirdparty').register({
     id: 'my-source',
     label: 'My Source',
-    available: () => true,
     search: async ({ query, maxResults, config }, signal) => ({
-      sources: [{ url: 'https://…', title: '…', snippet: '…' }],
+      sources: [{ url, title, snippet }],
       content: 'optional answer',
     }),
   })
 }
 ```
 
----
+## Configuration
 
-## ⚙️ Settings (settings partition `dsh-web-search-thirdparty`)
+Settings live under the `dsh-web-search-thirdparty` partition:
 
 ```yaml
 dsh-web-search-thirdparty:
   provider: searxng
-  searxngBaseURL: https://searx.be   # or a self-hosted instance, e.g. http://127.0.0.1:8666
-  tavilyApiKey: ""            # or export TAVILY_API_KEY
+  searxngBaseURL: https://searx.be   # or a self-hosted instance
   maxResults: 8
-  mergeResults: false         # multi-source merge + dedupe
-  maxPerDomain: 2             # 0 = unlimited
+  mergeResults: false
+  maxPerDomain: 2
   relevanceSort: false
   cacheEnabled: true
   cacheTtlMs: 60000
   retryCount: 1
   retryBackoffMs: 250
-  extraHeadersJson: '{}'
 ```
 
----
-
-## 📄 License
+## License
 
 BSD-3-Clause. See [LICENSE](LICENSE).
