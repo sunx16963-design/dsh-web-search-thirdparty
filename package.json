@@ -2,7 +2,6 @@
   "name": "dsh-web-search-thirdparty",
   "version": "0.1.0",
   "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE). Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
-  "private": true,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -10,7 +9,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "README.zh-CN.md",
+    "README.en.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
@@ -70,5 +69,8 @@
       ],
       "platform": "web"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
