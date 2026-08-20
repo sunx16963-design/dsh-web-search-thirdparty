@@ -15,3 +15,13 @@ First release.
 - TTL result cache
 - Test connection (latency / count / first title)
 - web_fetch page-retrieval provider (with body-size cap)
+
+## Stage 2 (健壮性)
+
+- 并行合并 + 并发控制（maxProviderConcurrency）
+- 缓存防击穿（同 key 并发共享一次请求）
+- 每源熔断（circuitEnabled / circuitFailureLimit / circuitCooldownMs）
+- web_fetch SSRF 加固（默认拦截私网 / 环回 / 云元数据）
+- 每源用量统计（getSearchStats / resetSearchStats）
+- 修复：缓存 key 并入后处理选项；统计平均延迟改用成功数分母
+- web_fetch 增加 HTML→Markdown 清洗（htmlToMarkdown）

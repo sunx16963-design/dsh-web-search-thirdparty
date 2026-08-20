@@ -115,6 +115,29 @@ describe('facade behavior', () => {
   })
 })
 
+  it('cache key includes post-processing options (maxPerDomain)', async () => {
+    let calls = 0
+    const sources = new Map<string, any>()
+    sources.set('sev', mkAdapter('sev', async () => { calls++; return { sources: [{ url: 'https://c/1' }] } }))
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
+    expect(calls).toBe(1) // 同配置命中缓存
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true, maxPerDomain: 0 })).search({ query: 'q', maxResults: 5 })
+    expect(calls).toBe(2) // maxPerDomain 变了 → 新缓存 key，重新请求
+  })
+
+  it('stats avgLatencyMs uses success count (0 when all failed)', async () => {
+    resetSearchStats()
+    const sources = new Map<string, any>()
+    sources.set('good', mkAdapter('good', async () => ({ sources: [{ url: 'https://g/1' }] })))
+    sources.set('bad', mkAdapter('bad', async () => { throw new Error('bad') }))
+    const c = cfg({ provider: 'bad', fallbackProviders: ['good'], cacheEnabled: false, statsEnabled: true })
+    await makeProvider({ sources, list: () => ['good', 'bad'] }, c).search({ query: 'q2', maxResults: 5 })
+    const st = getSearchStats()
+    expect(st.bad.avgLatencyMs).toBe(0)
+    expect(st.good.avgLatencyMs).toBeGreaterThanOrEqual(0)
+  })
+
 describe('ProviderRegistry duplicate id', () => {
   it('rejects registering the same id twice', () => {
     const ctx = { effect: (fn: any) => { const d = fn(); return () => d?.() } }

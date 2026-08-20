@@ -211,6 +211,8 @@ export declare class ThirdPartySearchProvider implements SearchProvider {
     available(): boolean;
     search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 }
+/** 极简 HTML→Markdown 清洗：去 script/style、块级换行、标题/链接/图片转 Markdown、解码实体、折叠空白。 */
+export declare function htmlToMarkdown(html: string): string;
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */
 export declare class LocalFetchProvider implements WebFetchProvider {
     private readonly resolveOptions;

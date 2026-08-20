@@ -613,7 +613,8 @@ const cacheStore = new Map<string, { at: number; result: SearchResult }>()
 
 function cacheKeyOf(cfg: Config, query: string, maxResults: number): string {
   return [cfg.provider, cfg.mergeResults ? 'm' : 'f', (cfg.fallbackProviders ?? []).join(','),
-    String(cfg.maxProviderQueries), query, String(maxResults)].join('|')
+    String(cfg.maxProviderQueries), query, String(maxResults),
+    String(cfg.maxPerDomain ?? 0), cfg.relevanceSort ? 'r' : '', String(cfg.snippetMaxLength ?? 0)].join('|')
 }
 
 function cacheGet(key: string, ttlMs: number): SearchResult | undefined {
@@ -711,7 +712,8 @@ function recordStat(id: string, ok: boolean, latencyMs: number, errMessage?: str
 export function getSearchStats(): Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> {
   const out: Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> = {}
   for (const [id, st] of searchStats) {
-    out[id] = { requests: st.requests, errors: st.errors, avgLatencyMs: st.requests > 0 ? Math.round(st.latencyMs / Math.max(1, st.requests - st.errors)) : 0, ...(st.lastError !== undefined ? { lastError: st.lastError } : {}) }
+    const success = st.requests - st.errors
+    out[id] = { requests: st.requests, errors: st.errors, avgLatencyMs: success > 0 ? Math.round(st.latencyMs / success) : 0, ...(st.lastError !== undefined ? { lastError: st.lastError } : {}) }
   }
   return out
 }
@@ -1074,6 +1076,27 @@ async function assertPublicUrl(url: URL, cfg: Config): Promise<void> {
   }
 }
 
+
+function stripInlineTags(html: string): string {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+/** 极简 HTML→Markdown 清洗：去 script/style、块级换行、标题/链接/图片转 Markdown、解码实体、折叠空白。 */
+export function htmlToMarkdown(html: string): string {
+  let s = String(html)
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  s = s.replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  s = s.replace(/<\/(?:p|div|li|tr|section|article|table|ul|ol|blockquote|nav|header|footer)>/gi, '\n')
+  s = s.replace(/<(?:br|hr)\s*\/?>/gi, '\n')
+  s = s.replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, (_m: unknown, src: string) => '![image](' + src + ')')
+  s = s.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m: unknown, href: string, txt: string) => '[' + stripInlineTags(txt) + '](' + href + ')')
+  s = s.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m: unknown, lvl: string, txt: string) => '#'.repeat(Number(lvl)) + ' ' + stripInlineTags(txt) + '\n')
+  s = s.replace(/<[^>]+>/g, ' ')
+  s = s.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/&apos;/gi, "'")
+  s = s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim()
+  return s
+}
+
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */
 export class LocalFetchProvider implements WebFetchProvider {
   readonly id = FETCH_PROVIDER_ID
@@ -1105,9 +1128,11 @@ export class LocalFetchProvider implements WebFetchProvider {
         signal: controller.signal,
         headers: { 'user-agent': r.cfg.fetchUserAgent, 'accept': 'text/html,text/*;q=0.9,application/json;q=0.8' },
       })
-      const text = await res.text()
-      const truncated = text.length > r.cfg.fetchMaxBodyChars
-      const content = truncated ? text.slice(0, r.cfg.fetchMaxBodyChars) : text
+      const rawText = await res.text()
+      const isHtml = /html/i.test(String(res.headers.get('content-type') ?? '')) || /^\s*</.test(rawText)
+      let content = isHtml ? htmlToMarkdown(rawText) : rawText
+      const truncated = content.length > r.cfg.fetchMaxBodyChars
+      if (truncated) content = content.slice(0, r.cfg.fetchMaxBodyChars) + (isHtml ? '' : '…')
       return {
         url: url.toString(),
         statusCode: res.status,
