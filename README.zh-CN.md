@@ -1,5 +1,7 @@
 # dsh-web-search-thirdparty
 
+> 🇨🇳 **中文** · [**English README**](./README.md)
+
 DSH（DeepSeek Harness）网络搜索的门面插件：替换 dsh 自带的“仅官方 DeepSeek”搜索，
 支持在设置里配置第三方搜索引擎，并自带抓取（web_fetch）provider，让模型既能“搜”
 又能“读”全文。以 **bundle 插件**安装后，自动接好 `web_search` / `web_fetch` 工具并带独立设置页。

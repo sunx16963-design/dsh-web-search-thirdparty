@@ -1,5 +1,7 @@
 # dsh-web-search-thirdparty
 
+> 🌏 **English** · [**中文文档**](./README.zh-CN.md)
+
 A DSH (DeepSeek Harness) web-search **provider facade**: it replaces the built-in
 DeepSeek-only search with configurable third-party search engines, gives every
 source its own settings UI, and adds a web-fetch (page retrieval) provider so the
