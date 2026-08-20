@@ -531,13 +531,14 @@ export function cleanSnippet(text: string | undefined, max: number): string | un
   sn = sn.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/g, "'")
   sn = sn.replace(/[\t\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
-  sn = sn.split(' | ').join(' ').replace(/(\|\s*---+\s*)+/g, ' ').replace(/\s{2,}/g, ' ').trim()
+  sn = sn.split(' | ').join(' ')
+  sn = sn.replace(/(\s*[-=_]{2,}\s*)+/g, ' ').replace(/\s{2,}/g, ' ').trim()
   if (sn.length > max) sn = sn.slice(0, max - 1).trimEnd() + '…'
   return sn.length > 0 ? sn : undefined
 }
 
 /** 取 URL 的根域名（去 www.）。 */
-function domainOf(url: string): string {
+export function domainOf(url: string): string {
   try {
     const host = new URL(url).hostname.toLowerCase()
     return host.startsWith('www.') ? host.slice(4) : host
@@ -547,7 +548,7 @@ function domainOf(url: string): string {
 }
 
 /** 每个域名最多保留 limit 条（0=不限制）。 */
-function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[] {
+export function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[] {
   if (limit <= 0) return sources
   const seen = new Map<string, number>()
   const out: T[] = []
@@ -561,7 +562,7 @@ function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[
   return out
 }
 
-function queryTokens(query: string): string[] {
+export function queryTokens(query: string): string[] {
   return (query || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean)
 }
 
@@ -577,7 +578,7 @@ function relevanceScore(src: SearchSource, tokens: string[]): number {
 }
 
 /** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
-function sortByRelevance(sources: SearchSource[], query: string): SearchSource[] {
+export function sortByRelevance(sources: SearchSource[], query: string): SearchSource[] {
   const tokens = queryTokens(query)
   return [...sources].sort((a, b) => relevanceScore(b, tokens) - relevanceScore(a, tokens))
 }

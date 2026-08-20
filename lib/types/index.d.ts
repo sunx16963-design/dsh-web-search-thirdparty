@@ -139,6 +139,13 @@ export declare function searchBing(r: Resolved, req: SearchRequest, signal?: Abo
 export declare function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 /** 清洗并截断 snippet：去 HTML 标签、折叠空白、限制长度。 */
 export declare function cleanSnippet(text: string | undefined, max: number): string | undefined;
+/** 取 URL 的根域名（去 www.）。 */
+export declare function domainOf(url: string): string;
+/** 每个域名最多保留 limit 条（0=不限制）。 */
+export declare function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[];
+export declare function queryTokens(query: string): string[];
+/** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
+export declare function sortByRelevance(sources: SearchSource[], query: string): SearchSource[];
 /** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
 export declare const BUILTIN_LABELS: Record<string, string>;
 /** 归一化的一条搜索结果（供自定义源返回）。 */
