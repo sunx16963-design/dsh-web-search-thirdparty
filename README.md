@@ -4,7 +4,13 @@ English | [简体中文](./README.zh-CN.md)
 
 A third-party web search plugin for DSH (DeepSeek Harness). It replaces the built-in DeepSeek-only search with configurable search engines, gives each engine its own settings, and can fetch full pages so the model can both search and read.
 
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), targeting **rc.7 / rc.8**.
+
+## Requirements
+
+- DSH (DeepSeek Harness) **rc.7** or **rc.8** with a working `dsh web` profile. Other versions: verify compatibility first.
+- **Node.js >= 20** — only needed when building from source; installing through the plugin manager needs no build.
+- Network access to at least one configured search engine / API.
 
 ## What it does
 
@@ -20,8 +26,9 @@ DSH's built-in web search only talks to the official DeepSeek API. This plugin l
 - Domain deduplication, relevance sorting, and result-count / timeout control.
 - A TTL result cache to avoid repeated upstream calls and save quota.
 - A "test connection" action that reports latency, result count, and the first title.
-- A `web_fetch` provider so the model can read full pages.
+- A `web_fetch` provider so the model can read full pages (HTML cleaned to Markdown).
 - An open provider-registration API for other plugins to add their own search source.
+- Per-source circuit breaker and usage statistics.
 
 ## Supported engines
 

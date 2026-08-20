@@ -4,7 +4,13 @@
 
 为 DSH（DeepSeek Harness）开发的第三方网页搜索插件。它用可配置的搜索引擎替换 dsh 自带的“仅官方 DeepSeek”搜索，为每个引擎提供独立设置，并能抓取网页全文，让模型既能搜索也能阅读。
 
-基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh web`）开发。
+基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 开发，目标版本 **rc.7 / rc.8**。
+
+## 系统要求
+
+- DSH（DeepSeek Harness）**rc.7** 或 **rc.8**，且 `dsh web` 可正常启动。其他版本请先验证兼容性。
+- **Node.js >= 20** —— 仅从源码构建时需要；通过插件管理器安装无需构建。
+- 能访问至少一个已配置的搜索引擎 / API。
 
 ## 插件做什么
 
@@ -20,8 +26,9 @@ DSH 自带的网页搜索只能对接官方 DeepSeek 接口。这个插件让你
 - 域名去重、相关度排序、结果条数与超时控制。
 - TTL 结果缓存，避免重复请求、节省配额。
 - “测试连接”功能，反馈延迟、结果条数与首条标题。
-- `web_fetch` 抓取 provider，便于模型阅读全文。
+- `web_fetch` 抓取 provider，HTML 清洗为 Markdown，便于模型阅读全文。
 - 开放 provider 注册 API，其它插件可挂载自己的搜索源。
+- 每源熔断与用量统计。
 
 ## 支持的引擎
 
