@@ -1,6 +1,6 @@
 # dsh-web-search-thirdparty
 
-> 🌏 **English** · [**中文文档**](./README.zh-CN.md)
+> 🌏 **English** · [**中文文档**](./README.zh-CN.md) · ⚙️ **Built for DSH** — [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
 
 A DSH (DeepSeek Harness) web-search **provider facade**: it replaces the built-in
 DeepSeek-only search with configurable third-party search engines, gives every
@@ -14,7 +14,7 @@ search seam, the `web_search` / `web_fetch` tools, and a friendly settings page.
 
 ## ✨ Features
 
-- **6 built-in engines** behind one facade: SearXNG · Tavily · Serper(bing) · Brave · Bing · Google CSE
+- **6 built-in engines** behind one facade: SearXNG · Tavily · Serper · Brave · Bing · Google CSE
 - **Open provider-registration API** — any other Cordis plugin can register its own search source
 - **Per-provider advanced params** in the settings UI (language / country / market / search_depth / safesearch / …)
 - **Custom endpoint / baseURL** per provider (self-hosted SearXNG, internal/proxy mirrors)
@@ -53,12 +53,12 @@ field to name its env var).
 ### From source clone
 ```bash
 # via the plugin manager (runs the quality gate + rollback)
-dshpm install github:your-name/dsh-web-search-thirdparty --profile web
+dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
 ### Local build & install
 ```bash
-git clone https://github.com/your-name/dsh-web-search-thirdparty.git
+git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install
 npm run build          # produces lib/
@@ -112,7 +112,7 @@ function apply(ctx) {
 ```yaml
 dsh-web-search-thirdparty:
   provider: searxng
-  searxngBaseURL: http://127.0.0.1:8666
+  searxngBaseURL: https://searx.be   # or a self-hosted instance, e.g. http://127.0.0.1:8666
   tavilyApiKey: ""            # or export TAVILY_API_KEY
   maxResults: 8
   mergeResults: false         # multi-source merge + dedupe
@@ -124,23 +124,6 @@ dsh-web-search-thirdparty:
   retryBackoffMs: 250
   extraHeadersJson: '{}'
 ```
-
----
-
-## 🔒 Security notes
-
-- **SSRF**: the built-in web_fetch provider follows the URL directly. Do not
-  enable it on a host that can reach sensitive internal targets without adding
-  private-network guards.
-- **Secrets**: keys are stored under DSH settings; never commit them. If a key was
-  shared, **revoke and regenerate** it.
-
-## ⚠️ Network / VPN
-
-Reachability is the one thing this plugin can't fix: if a target site/API is
-blocked on your network, point the engine at a reachable endpoint (self-hosted
-SearXNG, internal proxy) or use a VPN — and optionally set `extraHeadersJson`
-/ per-provider endpoints to route through a local proxy.
 
 ---
 

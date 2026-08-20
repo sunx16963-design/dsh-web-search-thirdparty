@@ -1,6 +1,6 @@
 # dsh-web-search-thirdparty
 
-> 🇨🇳 **中文** · [**English README**](./README.md)
+> 🇨🇳 **中文** · [**English README**](./README.md) · ⚙️ **为 DSH 构建** — [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 DSH（DeepSeek Harness）网络搜索的门面插件：替换 dsh 自带的“仅官方 DeepSeek”搜索，
 支持在设置里配置第三方搜索引擎，并自带抓取（web_fetch）provider，让模型既能“搜”
@@ -37,7 +37,7 @@ key 三选一：设置页直接填 / 写进 dsh credentials 服务 / 导出环�
 ## 🚀 安装
 ```bash
 # 走插件管理器（含质量门禁 + 回滚）
-dshpm install github:你的用户名/dsh-web-search-thirdparty --profile web
+dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 本地构建则：`npm install && npm run build`，再 `dshpm install /本地路径 --profile web`。
 装完**重启 web 一次**让设置页 UI 生效。
@@ -70,7 +70,7 @@ function apply(ctx) {
 ```yaml
 dsh-web-search-thirdparty:
   provider: searxng
-  searxngBaseURL: http://127.0.0.1:8666
+  searxngBaseURL: https://searx.be   # 或自建实例，如 http://127.0.0.1:8666
   tavilyApiKey: ""
   maxResults: 8
   mergeResults: false
@@ -82,14 +82,6 @@ dsh-web-search-thirdparty:
   retryBackoffMs: 250
   extraHeadersJson: '{}'
 ```
-
-## 🔒 安全
-- web_fetch 直接请求 URL，存在 **SSRF** 风险：能触达内网敏感目标的机器请先加私网拦截。
-- key 存在 DSH settings 里，**不要提交到仓库**；泄露过的 key 立即重置。
-
-## ⚠️ 网络 / VPN
-可达性插件解决不了：目标站点/API 被墙时，把引擎指向可达的 endpoint（自建 SearXNG、
-内网代理），或挂 VPN；也可用 `extraHeadersJson`/每源 endpoint 走本地代理。
 
 ## 📄 许可证
 BSD-3-Clause。见 [LICENSE](LICENSE)。
