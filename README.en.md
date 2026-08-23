@@ -8,7 +8,7 @@ Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), t
 
 ## Requirements
 
-- DSH (DeepSeek Harness) **rc.7** or **rc.8** with a working `dsh web` profile. Other versions: verify compatibility first.
+- DSH (DeepSeek Harness) **rc.6** or later (mainly verified on **rc.7 / rc.8**) with a working `dsh web` profile. Other versions: verify compatibility first.
 - **Node.js >= 20** — only needed when building from source; installing through the plugin manager needs no build.
 - Network access to at least one configured search engine / API.
 
@@ -28,7 +28,7 @@ DSH's built-in web search only talks to the official DeepSeek API. This plugin l
 - A "test connection" action that reports latency, result count, and the first title.
 - A `web_fetch` provider so the model can read full pages (HTML cleaned to Markdown).
 - An open provider-registration API for other plugins to add their own search source.
-- Per-source circuit breaker and usage statistics.
+- Per-source circuit breaker and usage statistics (visible in the settings page "Usage stats" panel; also exposed via `GET /api/web-search-thirdparty/stats`).
 
 ## Supported engines
 
@@ -83,6 +83,15 @@ npm pack
 ```
 
 A fresh clone builds with only public npm packages. The `@deepseek-ai/*` platform symbols are covered by ambient type shims at compile time; at runtime DSH provides the real packages.
+
+### Adding a new search engine
+
+Engine metadata lives in a single shared table, `src/engine-spec.ts` (drives the provider list, labels, credential inputs, endpoints, advanced-params form, test-route mapping and reset fields on both host and browser sides). Adding an engine takes two steps:
+
+1. Implement it in `src/index.ts` and register the function in `ENGINES`;
+2. Add one spec entry to `src/engine-spec.ts`.
+
+`tests/engine-spec.test.ts` cross-checks both ends so they cannot drift.
 
 ### Provider API
 

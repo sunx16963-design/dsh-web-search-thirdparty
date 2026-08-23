@@ -8,7 +8,7 @@
 
 ## 系统要求
 
-- DSH（DeepSeek Harness）**rc.7** 或 **rc.8**，且 `dsh web` 可正常启动。其他版本请先验证兼容性。
+- DSH（DeepSeek Harness）**rc.6** 及以上（主要在 **rc.7 / rc.8** 上验证），且 `dsh web` 可正常启动。
 - **Node.js >= 20** —— 仅从源码构建时需要；通过插件管理器安装无需构建。
 - 能访问至少一个已配置的搜索引擎 / API。
 
@@ -28,7 +28,7 @@ DSH 自带的网页搜索只能对接官方 DeepSeek 接口。这个插件让你
 - “测试连接”功能，反馈延迟、结果条数与首条标题。
 - `web_fetch` 抓取 provider，HTML 清洗为 Markdown，便于模型阅读全文。
 - 开放 provider 注册 API，其它插件可挂载自己的搜索源。
-- 每源熔断与用量统计。
+- 每源熔断与用量统计（设置页“用量统计”面板可查看各源请求/错误/延迟与熔断状态，也有 `GET /api/web-search-thirdparty/stats` 接口）。
 
 ## 支持的引擎
 
@@ -83,6 +83,15 @@ npm pack
 ```
 
 全新 clone 只用公共 npm 包即可构建。`@deepseek-ai/*` 的编译期类型由仓库自带的 ambient 垫片提供；运行期仍由 DSH 提供真实包。
+
+### 新增一个搜索引擎
+
+引擎信息集中在 `src/engine-spec.ts` 一张表里（provider 列表、标签、凭据输入行、endpoint、高级参数表单、测试路由映射、重置字段全部由它驱动），新增引擎只需两步：
+
+1. 在 `src/index.ts` 写实现函数并挂进 `ENGINES`；
+2. 在 `src/engine-spec.ts` 加一条 spec。
+
+宿主端与浏览器端共用这张表，`tests/engine-spec.test.ts` 会双向校验防止漂移。
 
 ### Provider API
 

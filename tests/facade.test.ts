@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   ThirdPartySearchProvider, ProviderRegistry, buildProviderChain, builtinAdapter,
-  cacheKeyOf, resetSearchStats, getSearchStats, PROVIDER_SERVICE_ID,
+  cacheKeyOf, resetSearchStats, getSearchStats, getCircuitStates, PROVIDER_SERVICE_ID,
 } from '../src/index'
+import { getEngineSpec } from '../src/engine-spec'
 
 function mkAdapter(id: string, search: any, available = () => true) {
   return { id, label: id, available, search }
@@ -121,6 +122,16 @@ describe('facade behavior', () => {
     expect(failCalls).toBe(2)
   })
 
+  it('exposes circuit state via getCircuitStates (for the stats panel)', async () => {
+    const sources = new Map<string, any>()
+    sources.set('f1', mkAdapter('f1', async () => { throw new Error('down') }))
+    sources.set('ok', mkAdapter('ok', async () => ({ sources: [{ url: 'https://ok/1' }] })))
+    const c = cfg({ provider: 'f1', fallbackProviders: ['ok'], cacheEnabled: false, circuitEnabled: true, circuitFailureLimit: 1, circuitCooldownMs: 60000 })
+    await makeProvider({ sources, list: () => ['f1', 'ok'] }, c).search({ query: 'cq', maxResults: 5 })
+    expect(getCircuitStates().f1?.open).toBe(true)
+    expect(getCircuitStates().f1?.failures).toBe(0) // 熔断后失败计数清零
+  })
+
   it('records per-source stats', async () => {
     resetSearchStats()
     const sources = new Map<string, any>()
@@ -211,8 +222,8 @@ describe('provider chain availability', () => {
   it('includes keyed sources whose key lives only in the credentials service', async () => {
     const credentials = { resolve: async () => ({ value: 'from-credentials' }) }
     const reg = new ProviderRegistry(fakeRegistryCtx() as any)
-    reg.register(builtinAdapter({} as any, 'searxng', 'SearXNG'))
-    reg.register(builtinAdapter({} as any, 'tavily', 'Tavily'))
+    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!))
+    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!))
     const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
     const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
     const chain = await buildProviderChain(c, reg, ctx as any)
@@ -222,8 +233,8 @@ describe('provider chain availability', () => {
   it('excludes keyed sources without any resolvable credential', async () => {
     const credentials = { resolve: async () => { throw new Error('no such credential') } }
     const reg = new ProviderRegistry(fakeRegistryCtx() as any)
-    reg.register(builtinAdapter({} as any, 'searxng', 'SearXNG'))
-    reg.register(builtinAdapter({} as any, 'tavily', 'Tavily'))
+    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!))
+    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!))
     const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
     const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
     const chain = await buildProviderChain(c, reg, ctx as any)
@@ -241,10 +252,16 @@ describe('provider chain availability', () => {
 })
 
 describe('ProviderRegistry duplicate id', () => {
-  it('rejects registering the same id twice', () => {
-    const ctx = { effect: (fn: any) => { const d = fn(); return () => d?.() } }
+  it('warns and replaces on duplicate id instead of throwing (hot-reload safe)', () => {
+    const warnings: any[] = []
+    const ctx = {
+      effect: (fn: any) => { const d = fn(); return () => d?.() },
+      logger: { warn: (...a: any[]) => warnings.push(a) },
+    }
     const reg = new ProviderRegistry(ctx as any)
     reg.register(mkAdapter('dup', async () => ({ sources: [] })))
-    expect(() => reg.register(mkAdapter('dup', async () => ({ sources: [] })))).toThrowError(/already registered/i)
+    expect(() => reg.register(mkAdapter('dup', async () => ({ sources: [] })))).not.toThrow()
+    expect(reg.list().filter((id) => id === 'dup')).toHaveLength(1)
+    expect(warnings.length).toBeGreaterThan(0)
   })
 })

@@ -17,6 +17,8 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { lookup as dnsLookup } from 'node:dns/promises'
+import { ENGINE_SPECS, getEngineSpec, engineInputs } from './engine-spec.js'
+import type { EngineSpec } from './engine-spec.js'
 
 /** Stable provider id registered on `ctx.web` (must match cordis.patch.yml `web.searchProvider`). */
 export const PROVIDER_ID = 'web-search-thirdparty'
@@ -152,7 +154,7 @@ export const Config = z.object({
   /** 抓取超时（ms）。 */
   fetchTimeoutMs: z.number().step(1000).min(1000).max(120000).default(15000),
   /** 抓取 User-Agent。 */
-  fetchUserAgent: z.string().default('deepseek-harness-web-search-thirdparty/0.2.0'),
+  fetchUserAgent: z.string().default('deepseek-harness-web-search-thirdparty/0.3.0'),
   /** 网络层失败重试次数。 */
   retryCount: z.number().step(1).min(0).max(5).default(1),
   /** 重试指数退避基数（ms）。 */
@@ -291,9 +293,27 @@ async function resolveApiKey(ctx: AppContext, spec: KeySpec): Promise<string | u
   return undefined
 }
 
-function requireKey(providerLabel: string, value: string | undefined): string {
+/** 按引擎 spec 解析全部凭据输入行（任一缺失即抛 WEB_PROVIDER_CREDENTIAL_MISSING）。 */
+async function resolveEngineKeys(r: Resolved, id: string): Promise<string[]> {
+  const spec = getEngineSpec(id)
+  if (spec === undefined) throw new WebError('未知引擎: ' + id, 'WEB_PROVIDER_ERROR')
+  const bag = r.cfg as unknown as Record<string, string | undefined>
+  const keys: string[] = []
+  for (const input of engineInputs(spec)) {
+    if (input.envRefKey === undefined || input.envVar === undefined) continue // 非凭据输入
+    const key = await resolveApiKey(r.ctx, {
+      literal: bag[input.configKey],
+      envRef: bag[input.envRefKey] || input.envVar,
+      envVar: input.envVar,
+    })
+    keys.push(requireKey(spec.label, key, input.testBodyField === 'cx' ? 'Search Engine ID (cx)' : 'API key'))
+  }
+  return keys
+}
+
+function requireKey(providerLabel: string, value: string | undefined, what = 'API key'): string {
   if (value === undefined || value.length === 0) {
-    throw new WebError(`${providerLabel}: 没有可用的 API key（在设置页填字面量、配置 credentials 引用，或导出对应环境变量）`, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+    throw new WebError(`${providerLabel}: 没有可用的 ${what}（在设置页填字面量、配置 credentials 引用，或导出对应环境变量）`, 'WEB_PROVIDER_CREDENTIAL_MISSING')
   }
   return value
 }
@@ -463,10 +483,8 @@ export async function searchSearxng(r: Resolved, req: SearchRequest, signal?: Ab
 }
 
 export async function searchTavily(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
-  const apiKey = requireKey('Tavily', await resolveApiKey(ctx, {
-    literal: cfg.tavilyApiKey, envRef: cfg.tavilyApiKeyEnv, envVar: 'TAVILY_API_KEY',
-  }))
+  const { cfg } = r
+  const [apiKey] = await resolveEngineKeys(r, 'tavily')
   const body: Record<string, unknown> = {
     query: req.query,
     search_depth: cfg.tavilySearchDepth === 'advanced' ? 'advanced' : 'basic',
@@ -488,10 +506,8 @@ export async function searchTavily(r: Resolved, req: SearchRequest, signal?: Abo
 }
 
 export async function searchSerper(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
-  const apiKey = requireKey('Serper', await resolveApiKey(ctx, {
-    literal: cfg.serperApiKey, envRef: cfg.serperApiKeyEnv, envVar: 'SERPER_API_KEY',
-  }))
+  const { cfg } = r
+  const [apiKey] = await resolveEngineKeys(r, 'serper')
   const body: Record<string, unknown> = { q: req.query, num: req.maxResults ?? 8 }
   if (cfg.serperLanguage.length > 0) body.gl = cfg.serperLanguage
   const data = await fetchJson('Serper', r, r.cfg.serperEndpoint, {
@@ -509,10 +525,8 @@ export async function searchSerper(r: Resolved, req: SearchRequest, signal?: Abo
 }
 
 export async function searchBrave(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
-  const apiKey = requireKey('Brave', await resolveApiKey(ctx, {
-    literal: cfg.braveApiKey, envRef: cfg.braveApiKeyEnv, envVar: 'BRAVE_API_KEY',
-  }))
+  const { cfg } = r
+  const [apiKey] = await resolveEngineKeys(r, 'brave')
   const url = new URL(r.cfg.braveEndpoint)
   url.searchParams.set('q', req.query)
   url.searchParams.set('count', String(req.maxResults ?? 8))
@@ -533,10 +547,8 @@ export async function searchBrave(r: Resolved, req: SearchRequest, signal?: Abor
 }
 
 export async function searchBing(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
-  const apiKey = requireKey('Bing', await resolveApiKey(ctx, {
-    literal: cfg.bingApiKey, envRef: cfg.bingApiKeyEnv, envVar: 'BING_SEARCH_API_KEY',
-  }))
+  const { cfg } = r
+  const [apiKey] = await resolveEngineKeys(r, 'bing')
   const url = new URL(cfg.bingEndpoint)
   url.searchParams.set('q', req.query)
   url.searchParams.set('mkt', cfg.bingMarket)
@@ -552,16 +564,8 @@ export async function searchBing(r: Resolved, req: SearchRequest, signal?: Abort
 }
 
 export async function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
-  const apiKey = requireKey('Google CSE', await resolveApiKey(ctx, {
-    literal: cfg.googleApiKey, envRef: cfg.googleApiKeyEnv, envVar: 'GOOGLE_CSE_API_KEY',
-  }))
-  const cx = await resolveApiKey(ctx, {
-    literal: cfg.googleSearchEngineId, envRef: cfg.googleSearchEngineIdEnv, envVar: 'GOOGLE_CSE_ID',
-  })
-  if (cx === undefined || cx.length === 0) {
-    throw new WebError('Google CSE: 需要配置 Search Engine ID (cx)', 'WEB_PROVIDER_CREDENTIAL_MISSING')
-  }
+  const { cfg } = r
+  const [apiKey, cx] = await resolveEngineKeys(r, 'google-cse')
   const url = new URL(r.cfg.googleEndpoint)
   url.searchParams.set('key', apiKey)
   url.searchParams.set('cx', cx)
@@ -589,7 +593,8 @@ export async function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: 
 // 门面 provider：available() + 内部路由
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>> = {
+/** 内置引擎实现表（id 与 ENGINE_SPECS 一一对应；完整性由 tests/engine-spec.test.ts 校验）。 */
+export const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>> = {
   searxng: searchSearxng,
   tavily: searchTavily,
   serper: searchSerper,
@@ -597,8 +602,6 @@ const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSi
   bing: searchBing,
   'google-cse': searchGoogleCse,
 }
-
-const ENGINE_IDS: Array<keyof typeof ENGINES> = Object.keys(ENGINES) as Array<keyof typeof ENGINES>
 
 /** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
 export function cleanSnippet(text: string | undefined, max: number): string | undefined {
@@ -662,9 +665,10 @@ export function sortByRelevance(sources: SearchSource[], query: string): SearchS
 /** 简单 TTL 内存缓存（省 key 额度，避免重复请求）。 */
 const cacheStore = new Map<string, { at: number; result: SearchResult }>()
 
-/** 当前配置涉及的全部引擎 endpoint（进缓存 key：换实例/镜像后不得命中旧结果）。 */
+/** 当前配置涉及的全部引擎 endpoint（进缓存 key：换实例/镜像后不得命中旧结果）。由 ENGINE_SPECS 驱动。 */
 function activeEndpointsOf(cfg: Config): string {
-  return [cfg.searxngBaseURL, cfg.tavilyEndpoint, cfg.serperEndpoint, cfg.braveEndpoint, cfg.bingEndpoint, cfg.googleEndpoint].join(',')
+  const bag = cfg as unknown as Record<string, unknown>
+  return ENGINE_SPECS.map((s) => String(bag[s.endpointKey] ?? '')).join(',')
 }
 
 export function cacheKeyOf(cfg: Config, query: string, maxResults: number): string {
@@ -744,6 +748,16 @@ async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 // ── 每源熔断（临时健康检查）──
 const circuitState = new Map<string, { failures: number; openUntil: number }>()
 
+/** 对外只读的熔断状态（设置页统计面板用）。 */
+export function getCircuitStates(): Record<string, { open: boolean; failures: number }> {
+  const out: Record<string, { open: boolean; failures: number }> = {}
+  const now = Date.now()
+  for (const [id, st] of circuitState) {
+    out[id] = { open: st.openUntil !== undefined && now < st.openUntil, failures: st.failures }
+  }
+  return out
+}
+
 function circuitOpen(cfg: Config, id: string): boolean {
   if (!cfg.circuitEnabled) return false
   const st = circuitState.get(id)
@@ -790,39 +804,28 @@ export function resetSearchStats(): void {
 }
 
 
-/** 内置 keyed 引擎的凭据描述（可用性探测与引擎实现共用同一套解析，避免两处漂移）。 */
-interface KeySpecResolver {
-  literal(cfg: Config): string | undefined
-  envRef(cfg: Config): string
-  envVar: string
-}
-
-const KEYED_SOURCE_SPECS: Record<string, KeySpecResolver> = {
-  tavily: { literal: (c) => c.tavilyApiKey, envRef: (c) => c.tavilyApiKeyEnv || 'TAVILY_API_KEY', envVar: 'TAVILY_API_KEY' },
-  serper: { literal: (c) => c.serperApiKey, envRef: (c) => c.serperApiKeyEnv || 'SERPER_API_KEY', envVar: 'SERPER_API_KEY' },
-  brave: { literal: (c) => c.braveApiKey, envRef: (c) => c.braveApiKeyEnv || 'BRAVE_API_KEY', envVar: 'BRAVE_API_KEY' },
-  bing: { literal: (c) => c.bingApiKey, envRef: (c) => c.bingApiKeyEnv || 'BING_SEARCH_API_KEY', envVar: 'BING_SEARCH_API_KEY' },
-}
-
 /** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
- *  searxng 恒可用；未知的自定义源 id 默认视为可用。 */
+ *  由 ENGINE_SPECS 的凭据输入行驱动（不带凭据的引擎如 searxng 恒可用）；
+ *  未知的自定义源 id 默认视为可用。 */
 export async function builtinKeyAvailable(ctx: AppContext, cfg: Config, id: string): Promise<boolean> {
-  if (id === 'searxng') return true
-  if (id === 'google-cse') {
-    const key = await resolveApiKey(ctx, { literal: cfg.googleApiKey, envRef: cfg.googleApiKeyEnv || 'GOOGLE_CSE_API_KEY', envVar: 'GOOGLE_CSE_API_KEY' })
-    const cx = await resolveApiKey(ctx, { literal: cfg.googleSearchEngineId, envRef: cfg.googleSearchEngineIdEnv || 'GOOGLE_CSE_ID', envVar: 'GOOGLE_CSE_ID' })
-    return key !== undefined && key.length > 0 && cx !== undefined && cx.length > 0
-  }
-  const spec = KEYED_SOURCE_SPECS[id]
+  const spec = getEngineSpec(id)
   if (spec === undefined) return true
-  const key = await resolveApiKey(ctx, { literal: spec.literal(cfg), envRef: spec.envRef(cfg), envVar: spec.envVar })
-  return key !== undefined && key.length > 0
+  const bag = cfg as unknown as Record<string, string | undefined>
+  for (const input of engineInputs(spec)) {
+    if (input.envRefKey === undefined || input.envVar === undefined) continue // 非凭据输入
+    const key = await resolveApiKey(ctx, {
+      literal: bag[input.configKey],
+      envRef: bag[input.envRefKey] || input.envVar,
+      envVar: input.envVar,
+    })
+    if (key === undefined || key.length === 0) return false
+  }
+  return true
 }
 
-/** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
-export const BUILTIN_LABELS: Record<string, string> = {
-  searxng: 'SearXNG', tavily: 'Tavily', serper: 'Serper', brave: 'Brave', bing: 'Bing', 'google-cse': 'Google CSE',
-}
+/** 内置引擎的展示名（由 ENGINE_SPECS 派生，对外暴露给第三方作者参考）。 */
+export const BUILTIN_LABELS: Record<string, string> =
+  Object.fromEntries(ENGINE_SPECS.map((s) => [s.id, s.label]))
 
 /** 归一化的一条搜索结果（供自定义源返回）。 */
 export interface SearchSourceItem {
@@ -857,7 +860,8 @@ export class ProviderRegistry extends Service {
 
   register(adapter: SearchSourceAdapter): () => void {
     if (this.sources.has(adapter.id)) {
-      throw new WebError('search source "' + adapter.id + '" is already registered', 'WEB_DUPLICATE_PROVIDER')
+      // 热重载场景下第三方插件会重复注册同一 id：警告并替换，不再抛错炸掉对方插件
+      this.ctx.logger?.warn?.('[web-search-thirdparty] search source "' + adapter.id + '" 已注册，将被替换（热重载）')
     }
     return this.ctx.effect(() => {
       this.sources.set(adapter.id, adapter)
@@ -869,11 +873,11 @@ export class ProviderRegistry extends Service {
 }
 
 /** 把内置引擎包装成统一 adapter（内部用；可用性由 buildProviderChain 走 credentials-aware 探测）。 */
-export function builtinAdapter(ctx: AppContext, id: keyof typeof ENGINES, label: string): SearchSourceAdapter {
-  const fn = ENGINES[id]
+export function builtinAdapter(ctx: AppContext, spec: EngineSpec): SearchSourceAdapter {
+  const fn = ENGINES[spec.id]
   return {
-    id: String(id),
-    label,
+    id: spec.id,
+    label: spec.label,
     search: async ({ query, maxResults, config }, signal) =>
       fn({ ctx, cfg: config as unknown as Config }, { query, maxResults }, signal),
   }
@@ -1067,29 +1071,25 @@ function readJsonBody(req: any): Promise<any> {
   })
 }
 
-/** 用当前配置 + 表单传入值，组装一次测试搜索用 config。 */
-function cfgFromTestBody(cfg: Config, body: any): Config {
+/** 用当前配置 + 表单传入值，组装一次测试搜索用 config（取值映射由 ENGINE_SPECS 驱动）。 */
+export function cfgFromTestBody(cfg: Config, body: any): Config {
   const next: Config = { ...cfg }
-  const provider = typeof body?.provider === 'string' ? body.provider : cfg.provider
-  next.provider = provider
+  const provider = typeof body?.provider === 'string' ? body.provider : ''
+  const spec = getEngineSpec(provider)
+  if (spec === undefined) return next
+  next.provider = spec.id
   const max = Number(body?.maxResults)
   if (Number.isInteger(max) && max > 0) next.maxResults = Math.min(max, 20)
-  const key = typeof body?.key === 'string' ? body.key : ''
-  const url = typeof body?.url === 'string' ? body.url : ''
-  const cx = typeof body?.cx === 'string' ? body.cx : ''
-  if (provider === 'searxng' && url.length > 0) next.searxngBaseURL = url
-  if (provider === 'tavily' && key.length > 0) next.tavilyApiKey = key
-  if (provider === 'serper' && key.length > 0) next.serperApiKey = key
-  if (provider === 'brave' && key.length > 0) next.braveApiKey = key
-  if (provider === 'bing' && key.length > 0) next.bingApiKey = key
-  if (provider === 'google-cse') {
-    if (key.length > 0) next.googleApiKey = key
-    if (cx.length > 0) next.googleSearchEngineId = cx
+  const bag = next as unknown as Record<string, string>
+  for (const input of engineInputs(spec)) {
+    const raw = body?.[input.testBodyField]
+    if (typeof raw === 'string' && raw.length > 0) bag[input.configKey] = raw
   }
   return next
 }
 
-function registerTestRoute(ctx: AppContext, current: () => Config): void {
+/** REST 路由：POST /api/web-search-thirdparty/test（试搜）+ GET /api/web-search-thirdparty/stats（用量统计）。 */
+function registerRoutes(ctx: AppContext, current: () => Config): void {
   ctx.inject(['webServer'], (webCtx: any) => {
     webCtx.effect(() => {
       const handler = async (req: any, res: any): Promise<void> => {
@@ -1148,9 +1148,18 @@ function registerTestRoute(ctx: AppContext, current: () => Config): void {
           })
         }
       }
-      const dispose = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/test', handler })
-      return () => { dispose?.() }
-    }, 'web-search-thirdparty: test route')
+      const statsHandler = (req: any, res: any): void => {
+        const method = req.method ?? ''
+        if (method !== 'GET' && method !== 'HEAD') {
+          sendJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'GET only' } })
+          return
+        }
+        sendJson(res, 200, { ok: true, stats: getSearchStats(), circuit: getCircuitStates() })
+      }
+      const disposeTest = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/test', handler })
+      const disposeStats = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/stats', handler: statsHandler })
+      return () => { disposeTest?.(); disposeStats?.() }
+    }, 'web-search-thirdparty: test + stats routes')
   })
 }
 
@@ -1368,11 +1377,11 @@ export function apply(ctx: AppContext, config: Config): void {
   })
   // 开放注册表服务：提供在 ctx 上，其它插件可注入注册自定义搜索源。
   const registry = new ProviderRegistry(ctx)
-  for (const id of ENGINE_IDS) {
-    registry.register(builtinAdapter(ctx, id, BUILTIN_LABELS[String(id)] ?? String(id)))
+  for (const spec of ENGINE_SPECS) {
+    registry.register(builtinAdapter(ctx, spec))
   }
   ctx.web.registerSearchProvider(new ThirdPartySearchProvider(() => resolveOptions(ctx, current())))
   ctx.web.registerFetchProvider(new LocalFetchProvider(() => resolveOptions(ctx, current())))
-  registerTestRoute(ctx, current)
+  registerRoutes(ctx, current)
   ctx.logger?.info?.('[web-search-thirdparty] 第三方搜索 provider 已注册（id=' + PROVIDER_ID + '，源码数 ' + registry.list().join(',') + '）')
 }

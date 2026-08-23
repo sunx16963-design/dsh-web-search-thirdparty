@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0] - 2026-08-23
+
+可维护性与 DX：引擎描述收敛为单表驱动，用量统计闭环。
+
+### Added
+- `GET /api/web-search-thirdparty/stats`：返回每源请求/错误/平均延迟与熔断状态
+- 设置页新增“用量统计”面板（展开即加载，可手动刷新）
+- `getCircuitStates()` 导出，供第三方读取熔断状态
+- `tests/engine-spec.test.ts` 完整性哨兵：spec 与实现、配置字段双向校验，防两端漂移
+
+### Changed
+- **引擎描述单表化**：新增共享模块 `src/engine-spec.ts`（纯数据），provider 列表、标签、凭据输入行、endpoint、高级参数表单、测试路由取值映射、重置字段全部由它驱动——新增引擎从改六处降为两处（写实现 + 加一条 spec）
+- 引擎凭据解析统一走 `resolveEngineKeys()`（由 spec 输入行派生），删除各引擎内硬编码的 key 三元组
+- `registry.register()` 重复 id 从抛错改为警告并替换（热重载第三方插件不再被炸掉）
+- “恢复默认”字段清单改由 spec 派生，并补齐此前遗漏的 endpoint / 重试 / 自定义头等全局项；修复 bingEndpoint 在列表里而其它引擎 endpoint 不在的不一致
+- 设置页保存后非敏感输入（SearXNG 实例 URL）正确回填；client `inject` 清理未使用的 locale/connection/remote
+
 ## [0.2.0] - 2026-08-23
 
 安全与正确性修复为主，含少量行为调整。

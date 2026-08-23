@@ -11,6 +11,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { Service } from '@deepseek-ai/cordis';
+import type { EngineSpec } from './engine-spec.js';
 /** Stable provider id registered on `ctx.web` (must match cordis.patch.yml `web.searchProvider`). */
 export declare const PROVIDER_ID = "web-search-thirdparty";
 export declare const FETCH_PROVIDER_ID = "web-search-thirdparty-fetch";
@@ -151,7 +152,8 @@ export declare function searchSerper(r: Resolved, req: SearchRequest, signal?: A
 export declare function searchBrave(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchBing(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
-declare const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>>;
+/** 内置引擎实现表（id 与 ENGINE_SPECS 一一对应；完整性由 tests/engine-spec.test.ts 校验）。 */
+export declare const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>>;
 /** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
 export declare function cleanSnippet(text: string | undefined, max: number): string | undefined;
 /** 取 URL 的根域名（去 www.）。 */
@@ -162,6 +164,11 @@ export declare function queryTokens(query: string): string[];
 /** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
 export declare function sortByRelevance(sources: SearchSource[], query: string): SearchSource[];
 export declare function cacheKeyOf(cfg: Config, query: string, maxResults: number): string;
+/** 对外只读的熔断状态（设置页统计面板用）。 */
+export declare function getCircuitStates(): Record<string, {
+    open: boolean;
+    failures: number;
+}>;
 export declare function getSearchStats(): Record<string, {
     requests: number;
     errors: number;
@@ -170,9 +177,10 @@ export declare function getSearchStats(): Record<string, {
 }>;
 export declare function resetSearchStats(): void;
 /** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
- *  searxng 恒可用；未知的自定义源 id 默认视为可用。 */
+ *  由 ENGINE_SPECS 的凭据输入行驱动（不带凭据的引擎如 searxng 恒可用）；
+ *  未知的自定义源 id 默认视为可用。 */
 export declare function builtinKeyAvailable(ctx: AppContext, cfg: Config, id: string): Promise<boolean>;
-/** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
+/** 内置引擎的展示名（由 ENGINE_SPECS 派生，对外暴露给第三方作者参考）。 */
 export declare const BUILTIN_LABELS: Record<string, string>;
 /** 归一化的一条搜索结果（供自定义源返回）。 */
 export interface SearchSourceItem {
@@ -210,7 +218,7 @@ export declare class ProviderRegistry extends Service {
     list(): string[];
 }
 /** 把内置引擎包装成统一 adapter（内部用；可用性由 buildProviderChain 走 credentials-aware 探测）。 */
-export declare function builtinAdapter(ctx: AppContext, id: keyof typeof ENGINES, label: string): SearchSourceAdapter;
+export declare function builtinAdapter(ctx: AppContext, spec: EngineSpec): SearchSourceAdapter;
 /** 构造要尝试的 provider 链：[主源, 显式 fallback, 其余可用源]，按注册表顺序，去重。
  *  内置源的可用性与真实搜索走同一套凭据解析（credentials 服务里的 key 也算已配置）；
  *  ctx 省略时退化为 adapter.available / 默认可用。 */
@@ -222,6 +230,8 @@ export declare class ThirdPartySearchProvider implements SearchProvider {
     available(): boolean;
     search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 }
+/** 用当前配置 + 表单传入值，组装一次测试搜索用 config（取值映射由 ENGINE_SPECS 驱动）。 */
+export declare function cfgFromTestBody(cfg: Config, body: any): Config;
 export declare function isPrivateIp(addr: string): boolean;
 export declare function isPrivateName(host: string): boolean;
 export declare function assertPublicUrl(url: URL, cfg: Config): Promise<void>;

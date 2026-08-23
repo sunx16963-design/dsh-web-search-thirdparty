@@ -6,51 +6,42 @@
  */
 import * as React from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { ENGINE_SPECS } from '../engine-spec.js'
+import type { EngineFieldSpec } from '../engine-spec.js'
 
 const NAMESPACE = 'dsh-web-search-thirdparty'
 
-const PROVIDERS: Array<{ id: string; label: string }> = [
-  { id: 'searxng', label: 'SearXNG' },
-  { id: 'tavily', label: 'Tavily' },
-  { id: 'serper', label: 'Serper' },
-  { id: 'brave', label: 'Brave' },
-  { id: 'bing', label: 'Bing' },
-  { id: 'google-cse', label: 'Google CSE' },
-]
+// 引擎清单 / 高级参数 / 凭据输入行全部由共享的 ENGINE_SPECS 派生，不再手工维护两份
+const PROVIDERS = ENGINE_SPECS.map((s) => ({ id: s.id, label: s.label }))
 
-/** 每供应商可独立配置的高级参数（可视化用）。 */
-const ADV_FIELDS: Record<string, Array<{ key: string; label: string; type: 'text' | 'number' | 'select'; options?: string[]; def: string; placeholder?: string }>> = {
-  searxng: [
-    { key: 'searxngLanguage', label: '语言', type: 'text', def: '', placeholder: '如 zh / en / all' },
-    { key: 'searxngCategories', label: '分类', type: 'text', def: 'general', placeholder: '如 general / news / science' },
-    { key: 'searxngSafesearch', label: '安全搜索 (0-2)', type: 'number', def: '0', placeholder: '0 宽松 · 2 严格' },
-  ],
-  tavily: [{ key: 'tavilySearchDepth', label: '搜索深度', type: 'select', options: ['basic', 'advanced'], def: 'basic' }],
-  serper: [{ key: 'serperLanguage', label: '地区代码 (gl)', type: 'text', def: '', placeholder: 'us / jp / de' }],
-  brave: [
-    { key: 'braveCountry', label: '国家代码', type: 'text', def: '', placeholder: 'us / jp' },
-    { key: 'braveSearchLang', label: '搜索语言', type: 'text', def: '', placeholder: 'en / ja' },
-  ],
-  bing: [{ key: 'bingMarket', label: '市场 (mkt)', type: 'text', def: 'en-US', placeholder: 'en-US / ja-JP' }],
-  'google-cse': [{ key: 'googleLanguage', label: '语言 (lr)', type: 'text', def: '', placeholder: 'lang_en / lang_zh-CN' }],
+function specOf(provider: string) {
+  return ENGINE_SPECS.find((s) => s.id === provider)
 }
-const RESET_FIELDS = [
-  'provider', 'timeoutMs', 'maxResults',
-  'searxngBaseURL', 'searxngLanguage', 'searxngCategories', 'searxngSafesearch',
-  'tavilyApiKey', 'tavilyApiKeyEnv', 'tavilySearchDepth',
-  'serperApiKey', 'serperApiKeyEnv', 'serperLanguage',
-  'braveApiKey', 'braveApiKeyEnv', 'braveCountry', 'braveSearchLang',
-  'bingApiKey', 'bingApiKeyEnv', 'bingEndpoint', 'bingMarket',
-  'googleApiKey', 'googleApiKeyEnv', 'googleSearchEngineId', 'googleSearchEngineIdEnv', 'googleLanguage',
-  'snippetMaxLength', 'mergeResults', 'fallbackProviders', 'maxProviderQueries',
+
+const GLOBAL_RESET_FIELDS = [
+  'provider', 'timeoutMs', 'maxResults', 'snippetMaxLength',
+  'mergeResults', 'fallbackProviders', 'maxProviderQueries',
   'maxPerDomain', 'relevanceSort', 'cacheEnabled', 'cacheTtlMs',
-  'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs', 'fetchAllowPrivate', 'statsEnabled',
-  'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
+  'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs',
+  'fetchAllowPrivate', 'statsEnabled', 'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
+  'retryCount', 'retryBackoffMs', 'extraHeadersJson',
 ]
 
-export const inject = ['slots', 'locale', 'settingsScope', 'connection', 'remote']
+const ENGINE_RESET_FIELDS = [
+  ...new Set(ENGINE_SPECS.flatMap((s) => [
+    s.endpointKey,
+    ...[s.input, ...(s.secondInput !== undefined ? [s.secondInput] : [])]
+      .map((i) => i.configKey)
+      .concat([s.input.envRefKey, s.secondInput?.envRefKey])
+      .filter((k): k is string => typeof k === 'string'),
+    ...s.fields.map((f) => f.key),
+  ])),
+]
+
+const RESET_FIELDS: string[] = [...GLOBAL_RESET_FIELDS, ...ENGINE_RESET_FIELDS]
+
+export const inject = ['slots', 'settingsScope']
 
 interface SettingsShape {
   provider?: string
@@ -65,15 +56,7 @@ interface SettingsShape {
 }
 
 function providerKeyLabel(provider: string): string {
-  switch (provider) {
-    case 'searxng': return 'SearXNG 实例 URL'
-    case 'tavily': return 'Tavily API Key'
-    case 'serper': return 'Serper API Key'
-    case 'brave': return 'Brave API Key'
-    case 'bing': return 'Bing API Key'
-    case 'google-cse': return 'Google API Key'
-    default: return 'API Key'
-  }
+  return specOf(provider)?.input.label ?? 'API Key'
 }
 
 function label(text: string): HTMLLabelElement {
@@ -185,6 +168,48 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   enhDetails.appendChild(enhBody)
   root.appendChild(enhDetails)
 
+  // ── 用量统计（GET /api/web-search-thirdparty/stats）──
+  const statDetails = document.createElement('details')
+  statDetails.style.cssText = 'border:1px solid currentcolor;border-radius:8px;padding:8px 10px'
+  const statSummary = document.createElement('summary')
+  statSummary.textContent = '用量统计'
+  statSummary.style.cssText = 'font-size:13px;font-weight:600;cursor:pointer'
+  const statBody = document.createElement('div')
+  statBody.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:12px;opacity:.9'
+  statBody.textContent = '展开后加载…'
+  const statRefresh = button('刷新统计', 'normal')
+  statRefresh.style.marginTop = '6px'
+  async function loadStats(): Promise<void> {
+    statBody.textContent = '加载中…'
+    try {
+      const res = await fetch('/api/web-search-thirdparty/stats')
+      const json: any = await res.json()
+      const entries = Object.entries((json?.stats ?? {}) as Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }>)
+      if (entries.length === 0) {
+        statBody.textContent = '暂无数据：发起一次搜索或点“测试连接”后再来看。'
+        return
+      }
+      const circuits = (json?.circuit ?? {}) as Record<string, { open?: boolean }>
+      statBody.textContent = ''
+      for (const [id, st] of entries) {
+        const line = document.createElement('div')
+        let text = id + ' · ' + st.requests + ' 次 · 错误 ' + st.errors + ' · 均 ' + st.avgLatencyMs + 'ms'
+        if (circuits[id]?.open === true) text += ' · 熔断中'
+        if (st.lastError !== undefined && st.lastError.length > 0) text += ' · ' + st.lastError.slice(0, 80)
+        line.textContent = text
+        statBody.appendChild(line)
+      }
+    } catch (error) {
+      statBody.textContent = '加载失败：' + String(error)
+    }
+  }
+  statRefresh.addEventListener('click', () => { void loadStats() })
+  statDetails.addEventListener('toggle', () => { if ((statDetails as any).open) void loadStats() })
+  statDetails.appendChild(statSummary)
+  statDetails.appendChild(statBody)
+  statDetails.appendChild(statRefresh)
+  root.appendChild(statDetails)
+
   const perDomainRow = row()
   const perDomainInput = input('number')
   perDomainInput.min = '0'; perDomainInput.max = '20'; perDomainInput.step = '1'
@@ -222,7 +247,7 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   let advInputs: Array<{ key: string; input: HTMLInputElement | HTMLSelectElement; numeric: boolean }> = []
   function renderAdv(provider: string): void {
     advBody.textContent = ''
-    const specs = ADV_FIELDS[provider] ?? []
+    const specs: EngineFieldSpec[] = specOf(provider)?.fields ?? []
     advDetails.style.display = specs.length > 0 ? '' : 'none'
     advSummary.textContent = '高级参数（' + provider + '）'
     advInputs = []
@@ -264,12 +289,14 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   root.appendChild(btnRow)
 
   function refreshSecretPlaceholder(provider: string): void {
-    keyLabel.textContent = providerKeyLabel(provider)
-    keyInput.placeholder = providerKeyLabel(provider)
-    const isGoogle = provider === 'google-cse'
-    cxRow.style.display = isGoogle ? 'flex' : 'none'
-    cxInput.style.display = isGoogle ? '' : 'none'
-    if (!isGoogle) cxInput.value = ''
+    const spec = specOf(provider)
+    const labelText = spec?.input.label ?? 'API Key'
+    keyLabel.textContent = labelText
+    keyInput.placeholder = labelText
+    const hasCx = spec?.secondInput !== undefined
+    cxRow.style.display = hasCx ? 'flex' : 'none'
+    cxInput.style.display = hasCx ? '' : 'none'
+    if (!hasCx) cxInput.value = ''
   }
 
   function syncFromScope(): void {
@@ -279,8 +306,14 @@ function mountForm(container: HTMLElement, scope: any): () => void {
     const provider = v.provider ?? 'searxng'
     select.value = provider
     maxInput.value = String(v.maxResults ?? 8)
-    if (provider === 'searxng') keyInput.value = v.searxngBaseURL ?? ''
-    else keyInput.value = ''
+    // 敏感值不回显；非敏感（如 SearXNG 实例 URL）从配置回填
+    const spec = specOf(provider)
+    if (spec !== undefined && !spec.input.secret) {
+      const cur = (v as any)[spec.input.configKey]
+      keyInput.value = (cur !== undefined && cur !== null && cur !== '') ? String(cur) : ''
+    } else {
+      keyInput.value = ''
+    }
     mergeCheck.checked = v.mergeResults === true
     refreshSecretPlaceholder(provider)
     renderAdv(provider)
@@ -323,23 +356,17 @@ function mountForm(container: HTMLElement, scope: any): () => void {
 
   saveBtn.addEventListener('click', async () => {
     const provider = select.value
+    const spec = specOf(provider)
     const writes: Array<Promise<void>> = []
     writes.push(scope.set('provider', provider))
-    const key = keyInput.value.trim()
-    if (provider === 'searxng') {
-      if (key.length > 0) writes.push(scope.set('searxngBaseURL', key))
-    } else if (provider === 'tavily' && key.length > 0) {
-      writes.push(scope.set('tavilyApiKey', key))
-    } else if (provider === 'serper' && key.length > 0) {
-      writes.push(scope.set('serperApiKey', key))
-    } else if (provider === 'brave' && key.length > 0) {
-      writes.push(scope.set('braveApiKey', key))
-    } else if (provider === 'bing' && key.length > 0) {
-      writes.push(scope.set('bingApiKey', key))
-    } else if (provider === 'google-cse') {
-      if (key.length > 0) writes.push(scope.set('googleApiKey', key))
-      const cx = cxInput.value.trim()
-      if (cx.length > 0) writes.push(scope.set('googleSearchEngineId', cx))
+    if (spec !== undefined) {
+      // 主输入行（key 或 SearXNG 实例 URL）与可选第二输入行（cx）由 spec 驱动
+      const mainVal = keyInput.value.trim()
+      if (mainVal.length > 0) writes.push(scope.set(spec.input.configKey, mainVal))
+      if (spec.secondInput !== undefined) {
+        const cxVal = cxInput.value.trim()
+        if (cxVal.length > 0) writes.push(scope.set(spec.secondInput.configKey, cxVal))
+      }
     }
     writes.push(scope.set('maxResults', clampMax(Number(maxInput.value))))
     writes.push(scope.set('mergeResults', mergeCheck.checked))
