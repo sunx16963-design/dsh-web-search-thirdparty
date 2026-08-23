@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cleanSnippet, domainOf, dedupeByDomain, queryTokens, sortByRelevance } from '../src/index'
+import { cleanSnippet, decodeEntities, normalizePublishedAt, domainOf, dedupeByDomain, queryTokens, sortByRelevance } from '../src/index'
 
 describe('cleanSnippet', () => {
   it('strips html tags and collapses whitespace', () => {
@@ -52,5 +52,29 @@ describe('sortByRelevance', () => {
 describe('queryTokens', () => {
   it('splits on non-alnum and CJK is kept', () => {
     expect(queryTokens('DeepSeek AI 青森')).toEqual(['deepseek', 'ai', '青森'])
+  })
+})
+
+describe('decodeEntities', () => {
+  it('decodes named, decimal and hex entities incl. CJK', () => {
+    expect(decodeEntities('&amp; &copy; &#39; &#x27; &#x4e2d;')).toBe('& © \' \' 中')
+  })
+  it('keeps unknown entities verbatim', () => {
+    expect(decodeEntities('&nosuch; 5&lt;6')).toBe('&nosuch; 5<6')
+  })
+  it('flows through cleanSnippet', () => {
+    expect(cleanSnippet('A &hellip;B&nbsp;&amp;&#x4e2d;', 200)).toBe('A …B &中')
+  })
+})
+
+describe('normalizePublishedAt', () => {
+  it('normalizes parseable dates to ISO', () => {
+    expect(normalizePublishedAt('2026-01-01')).toBe('2026-01-01T00:00:00.000Z')
+    expect(normalizePublishedAt(1735689600)).toBe('2025-01-01T00:00:00.000Z') // 秒级时间戳
+  })
+  it('drops prose ages and empty values (Brave page_age style)', () => {
+    expect(normalizePublishedAt('2 hours ago')).toBeUndefined()
+    expect(normalizePublishedAt(undefined)).toBeUndefined()
+    expect(normalizePublishedAt('')).toBeUndefined()
   })
 })

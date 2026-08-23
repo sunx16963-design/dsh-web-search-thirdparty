@@ -143,13 +143,16 @@ interface Resolved {
     ctx: AppContext;
     cfg: Config;
 }
+/** 归一化时间戳：可解析的转 ISO；解析不了的（如 Brave 的 “2 hours ago”、Serper 的相对日期）直接丢弃。 */
+export declare function normalizePublishedAt(value: unknown): string | undefined;
 export declare function searchSearxng(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchTavily(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchSerper(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchBrave(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchBing(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
-/** 清洗并截断 snippet：去 HTML 标签、折叠空白、限制长度。 */
+declare const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>>;
+/** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
 export declare function cleanSnippet(text: string | undefined, max: number): string | undefined;
 /** 取 URL 的根域名（去 www.）。 */
 export declare function domainOf(url: string): string;
@@ -158,6 +161,7 @@ export declare function dedupeByDomain<T extends SearchSource>(sources: T[], lim
 export declare function queryTokens(query: string): string[];
 /** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
 export declare function sortByRelevance(sources: SearchSource[], query: string): SearchSource[];
+export declare function cacheKeyOf(cfg: Config, query: string, maxResults: number): string;
 export declare function getSearchStats(): Record<string, {
     requests: number;
     errors: number;
@@ -165,6 +169,9 @@ export declare function getSearchStats(): Record<string, {
     lastError?: string;
 }>;
 export declare function resetSearchStats(): void;
+/** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
+ *  searxng 恒可用；未知的自定义源 id 默认视为可用。 */
+export declare function builtinKeyAvailable(ctx: AppContext, cfg: Config, id: string): Promise<boolean>;
 /** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
 export declare const BUILTIN_LABELS: Record<string, string>;
 /** 归一化的一条搜索结果（供自定义源返回）。 */
@@ -202,8 +209,12 @@ export declare class ProviderRegistry extends Service {
     register(adapter: SearchSourceAdapter): () => void;
     list(): string[];
 }
-/** 构造要尝试的 provider 链：[主源, 其余可用源]，按注册表顺序，去重。 */
-export declare function buildProviderChain(cfg: Config, registry: ProviderRegistry): string[];
+/** 把内置引擎包装成统一 adapter（内部用；可用性由 buildProviderChain 走 credentials-aware 探测）。 */
+export declare function builtinAdapter(ctx: AppContext, id: keyof typeof ENGINES, label: string): SearchSourceAdapter;
+/** 构造要尝试的 provider 链：[主源, 显式 fallback, 其余可用源]，按注册表顺序，去重。
+ *  内置源的可用性与真实搜索走同一套凭据解析（credentials 服务里的 key 也算已配置）；
+ *  ctx 省略时退化为 adapter.available / 默认可用。 */
+export declare function buildProviderChain(cfg: Config, registry: ProviderRegistry, ctx?: AppContext): Promise<string[]>;
 export declare class ThirdPartySearchProvider implements SearchProvider {
     private readonly resolveOptions;
     readonly id = "web-search-thirdparty";
@@ -211,6 +222,11 @@ export declare class ThirdPartySearchProvider implements SearchProvider {
     available(): boolean;
     search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 }
+export declare function isPrivateIp(addr: string): boolean;
+export declare function isPrivateName(host: string): boolean;
+export declare function assertPublicUrl(url: URL, cfg: Config): Promise<void>;
+/** 通用 HTML 实体解码：命名 + &#123; 十进制 + &#x1F; 十六进制；未知实体原样保留。 */
+export declare function decodeEntities(input: string): string;
 /** 极简 HTML→Markdown 清洗：去 script/style、块级换行、标题/链接/图片转 Markdown、解码实体、折叠空白。 */
 export declare function htmlToMarkdown(html: string): string;
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */

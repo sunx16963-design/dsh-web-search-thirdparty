@@ -125,7 +125,7 @@ export const Config = z.object({
   mergeResults: z.boolean().default(false),
   /** 附加降级源 id 列表（空=自动使用其它全部可用源）。 */
   fallbackProviders: z.array(z.string()).default([]),
-  /** 合并/降级时最多查询的源数。 */
+  /** 合并/降级模式下单次搜索最多查询的源数（含主源，两种模式都生效）。 */
   maxProviderQueries: z.number().step(1).min(1).max(6).default(2),
   /** 每个域名最多保留的结果数（0=不限制）。 */
   maxPerDomain: z.number().step(1).min(0).max(20).default(2),
@@ -152,7 +152,7 @@ export const Config = z.object({
   /** 抓取超时（ms）。 */
   fetchTimeoutMs: z.number().step(1000).min(1000).max(120000).default(15000),
   /** 抓取 User-Agent。 */
-  fetchUserAgent: z.string().default('deepseek-harness-web-search-thirdparty/0.1.0'),
+  fetchUserAgent: z.string().default('deepseek-harness-web-search-thirdparty/0.2.0'),
   /** 网络层失败重试次数。 */
   retryCount: z.number().step(1).min(0).max(5).default(1),
   /** 重试指数退避基数（ms）。 */
@@ -282,8 +282,12 @@ async function resolveApiKey(ctx: AppContext, spec: KeySpec): Promise<string | u
       /* 回落到启动环境 */
     }
   }
-  const ambient = launchEnvironmentOf(ctx).get(spec.envVar)
-  if (ambient !== undefined && ambient.value.length > 0) return ambient.value
+  try {
+    const ambient = launchEnvironmentOf(ctx).get(spec.envVar)
+    if (ambient !== undefined && ambient.value.length > 0) return ambient.value
+  } catch {
+    /* 启动环境不可用时按未配置处理 */
+  }
   return undefined
 }
 
@@ -310,14 +314,33 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** 从错误响应里提取人类可读的 detail（保留 HTTP 状态码兜底）。 */
+async function httpErrorDetail(res: any): Promise<string> {
+  try {
+    const raw = await res.text()
+    try {
+      const body: any = JSON.parse(raw)
+      const m = body?.errors?.[0]?.message ?? body?.error?.message ?? body?.error ?? body?.message
+      if (typeof m === 'string' && m.length > 0) return `${m} (HTTP ${res.status})`
+    } catch { /* 非 JSON 响应体 */ }
+  } catch { /* 响应体读取失败 */ }
+  return `HTTP ${res.status}`
+}
+
 async function fetchJson(providerLabel: string, r: Resolved, url: string, init: RequestInit, signal?: AbortSignal): Promise<any> {
   const cfg = r.cfg
   const extra = parseHeaders(cfg.extraHeadersJson)
   const retries = Math.max(0, Number(cfg.retryCount) || 0)
   const backoff = Math.max(0, Number(cfg.retryBackoffMs) || 0)
-  let lastError: unknown = undefined
+  let lastDetail = ''
+  let sleptRetryAfter = false
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0 && backoff > 0) await sleepMs(backoff * Math.pow(2, attempt - 1))
+    if (attempt > 0 && backoff > 0 && !sleptRetryAfter) {
+      // 指数退避 + 随机抖动（上限 10s），避免同刻重试踩踏
+      const jitter = 0.5 + Math.random() * 0.5
+      await sleepMs(Math.min(backoff * Math.pow(2, attempt - 1) * jitter, 10000))
+    }
+    sleptRetryAfter = false
     try {
       const res = await fetch(url, {
         ...init,
@@ -325,28 +348,35 @@ async function fetchJson(providerLabel: string, r: Resolved, url: string, init: 
         ...(signal !== undefined ? { signal } : {}),
       })
       if (!res.ok) {
-        let detail = `HTTP ${res.status}`
-        try {
-          const body: any = await res.json()
-          const m = body?.errors?.[0]?.message ?? body?.error?.message ?? body?.error ?? body?.message
-          if (typeof m === 'string' && m.length > 0) detail = m
-        } catch { /* 保留 HTTP 状态 */ }
-        throw new WebError(`${providerLabel} error: ${detail}`, 'WEB_PROVIDER_ERROR')
+        lastDetail = await httpErrorDetail(res)
+        // 仅瞬态状态可重试（429 / 5xx）；其余 4xx 业务错误立即失败
+        const transient = res.status === 429 || res.status >= 500
+        if (!transient || attempt >= retries) {
+          throw new WebError(`${providerLabel} error: ${lastDetail}`, 'WEB_PROVIDER_ERROR')
+        }
+        // 尊重 Retry-After（上限 10s，避免长阻塞）；已等过就跳过下一轮退避，避免双重等待
+        const retryAfter = Number(res.headers.get('retry-after'))
+        if (Number.isFinite(retryAfter) && retryAfter > 0) {
+          sleptRetryAfter = true
+          await sleepMs(Math.min(retryAfter * 1000, 10000))
+        }
+        try { await res.arrayBuffer() } catch { /* 连接释放失败不阻塞重试 */ }
+        continue
       }
       return await res.json() as any
     } catch (error) {
       if (signal?.aborted === true || (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')) {
         throw new WebError(`${providerLabel} search aborted`, 'WEB_ABORTED', { cause: error })
       }
-      // HTTP / 解析类错误不可重试（4xx/5xx 业务错误）；仅重试网络层失败（TypeError: fetch failed）
+      // 业务错误直接上抛；仅网络层失败（TypeError: fetch failed 等）参与退避重试
       if (error instanceof WebError) throw error
-      lastError = error
+      lastDetail = String(error)
       if (attempt >= retries) {
-        throw new WebError(`${providerLabel} request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+        throw new WebError(`${providerLabel} request failed: ${lastDetail}`, 'WEB_PROVIDER_ERROR', { cause: error })
       }
     }
   }
-  throw new WebError(`${providerLabel} request failed: ${String(lastError)}`, 'WEB_PROVIDER_ERROR', { cause: lastError })
+  throw new WebError(`${providerLabel} request failed: ${lastDetail}`, 'WEB_PROVIDER_ERROR')
 }
 
 function asHeaders(h: any): Record<string, string> {
@@ -372,12 +402,38 @@ function dedupe(sources: SearchSource[]): SearchSource[] {
   return out
 }
 
+/** 归一化时间戳：可解析的转 ISO；解析不了的（如 Brave 的 “2 hours ago”、Serper 的相对日期）直接丢弃。 */
+export function normalizePublishedAt(value: unknown): string | undefined {
+  if (value == null) return undefined
+  const s = String(value).trim()
+  if (s.length === 0) return undefined
+  if (/^\d+$/.test(s)) {
+    const n = Number(s)
+    const d = new Date(s.length >= 13 ? n : n * 1000) // 秒/毫秒时间戳自适应
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+  }
+  const t = Date.parse(s)
+  return Number.isNaN(t) ? undefined : new Date(t).toISOString()
+}
+
+/** 引擎原始字段 → 归一化 SearchSource（空值字段一律省略）。 */
+function toSource(url: unknown, title: unknown, snippet: unknown, published: unknown): SearchSource {
+  const out: SearchSource = { url: String(url ?? '').trim() }
+  const t = String(title ?? '')
+  if (t.length > 0) out.title = t
+  const sn = String(snippet ?? '')
+  if (sn.length > 0) out.snippet = sn
+  const pub = normalizePublishedAt(published)
+  if (pub !== undefined) out.publishedAt = pub
+  return out
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 六个引擎实现
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function searchSearxng(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
-  const { ctx, cfg } = r
+  const { cfg } = r
   const base = cfg.searxngBaseURL.length > 0 ? cfg.searxngBaseURL : DEFAULT_SEARXNG_BASE_URL
   const url = new URL('/search', base)
   url.searchParams.set('q', req.query)
@@ -385,15 +441,24 @@ export async function searchSearxng(r: Resolved, req: SearchRequest, signal?: Ab
   if (cfg.searxngLanguage.length > 0) url.searchParams.set('language', cfg.searxngLanguage)
   if (cfg.searxngCategories.length > 0) url.searchParams.set('categories', cfg.searxngCategories)
   url.searchParams.set('safesearch', String(cfg.searxngSafesearch))
-  const data = await fetchJson('SearXNG', r, url.toString(), { headers: { accept: 'application/json' } }, signal)
+  let data: any
+  try {
+    data = await fetchJson('SearXNG', r, url.toString(), { headers: { accept: 'application/json' } }, signal)
+  } catch (error) {
+    // 公共实例普遍禁用 format=json 或有 bot 检测：403 时给出可操作的提示而不是裸状态码
+    if (error instanceof WebError && /\b403\b/.test(error.message)) {
+      throw new WebError(
+        'SearXNG error: HTTP 403 — 该实例可能未启用 JSON 输出（自建实例需在 settings.yml 的 search.formats 中加入 json），或触发了 bot 检测。建议自建 SearXNG 并配置 searxngBaseURL',
+        'WEB_PROVIDER_ERROR',
+        { cause: error },
+      )
+    }
+    throw error
+  }
   const raw = Array.isArray(data?.results) ? data.results : []
   return {
-    sources: dedupe(raw.map((item: any): SearchSource => ({
-      url: String(item?.url ?? '').trim(),
-      ...(item?.title != null && String(item.title).length > 0 ? { title: String(item.title) } : {}),
-      ...(item?.content != null && String(item.content).length > 0 ? { snippet: String(item.content) } : {}),
-      ...(item?.publishedDate != null && String(item.publishedDate).length > 0 ? { publishedAt: String(item.publishedDate) } : {}),
-    }))),
+    sources: dedupe(raw.map((item: any): SearchSource =>
+      toSource(item?.url, item?.title, item?.content, item?.publishedDate))),
   }
 }
 
@@ -403,7 +468,6 @@ export async function searchTavily(r: Resolved, req: SearchRequest, signal?: Abo
     literal: cfg.tavilyApiKey, envRef: cfg.tavilyApiKeyEnv, envVar: 'TAVILY_API_KEY',
   }))
   const body: Record<string, unknown> = {
-    api_key: apiKey,
     query: req.query,
     search_depth: cfg.tavilySearchDepth === 'advanced' ? 'advanced' : 'basic',
     include_answer: true,
@@ -411,18 +475,14 @@ export async function searchTavily(r: Resolved, req: SearchRequest, signal?: Abo
   }
   const data = await fetchJson('Tavily', r, r.cfg.tavilyEndpoint, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(body),
   }, signal)
   const raw = Array.isArray(data?.results) ? data.results : []
   const answer = typeof data?.answer === 'string' && data.answer.length > 0 ? data.answer : undefined
   return {
-    sources: dedupe(raw.map((item: any): SearchSource => ({
-      url: String(item?.url ?? '').trim(),
-      ...(item?.title != null && String(item.title).length > 0 ? { title: String(item.title) } : {}),
-      ...(item?.content != null && String(item.content).length > 0 ? { snippet: String(item.content) } : {}),
-      ...(item?.published_date != null && String(item.published_date).length > 0 ? { publishedAt: String(item.published_date) } : {}),
-    }))),
+    sources: dedupe(raw.map((item: any): SearchSource =>
+      toSource(item?.url, item?.title, item?.content, item?.published_date))),
     ...(answer !== undefined ? { content: answer } : {}),
   }
 }
@@ -432,7 +492,7 @@ export async function searchSerper(r: Resolved, req: SearchRequest, signal?: Abo
   const apiKey = requireKey('Serper', await resolveApiKey(ctx, {
     literal: cfg.serperApiKey, envRef: cfg.serperApiKeyEnv, envVar: 'SERPER_API_KEY',
   }))
-  const body: Record<string, unknown> = { q: req.query }
+  const body: Record<string, unknown> = { q: req.query, num: req.maxResults ?? 8 }
   if (cfg.serperLanguage.length > 0) body.gl = cfg.serperLanguage
   const data = await fetchJson('Serper', r, r.cfg.serperEndpoint, {
     method: 'POST',
@@ -442,12 +502,8 @@ export async function searchSerper(r: Resolved, req: SearchRequest, signal?: Abo
   const raw = Array.isArray(data?.organic) ? data.organic : []
   const answer = data?.answerBox?.answer ?? data?.knowledgeGraph?.description
   return {
-    sources: dedupe(raw.map((item: any): SearchSource => ({
-      url: String(item?.link ?? '').trim(),
-      ...(item?.title != null && String(item.title).length > 0 ? { title: String(item.title) } : {}),
-      ...(item?.snippet != null && String(item.snippet).length > 0 ? { snippet: String(item.snippet) } : {}),
-      ...(item?.date != null && String(item.date).length > 0 ? { publishedAt: String(item.date) } : {}),
-    }))),
+    sources: dedupe(raw.map((item: any): SearchSource =>
+      toSource(item?.link, item?.title, item?.snippet, item?.date))),
     ...(typeof answer === 'string' && answer.length > 0 ? { content: answer } : {}),
   }
 }
@@ -490,12 +546,8 @@ export async function searchBing(r: Resolved, req: SearchRequest, signal?: Abort
   }, signal)
   const raw = Array.isArray(data?.webPages?.value) ? data.webPages.value : []
   return {
-    sources: dedupe(raw.map((item: any): SearchSource => ({
-      url: String(item?.url ?? '').trim(),
-      ...(item?.name != null && String(item.name).length > 0 ? { title: String(item.name) } : {}),
-      ...(item?.snippet != null && String(item.snippet).length > 0 ? { snippet: String(item.snippet) } : {}),
-      ...(item?.datePublished != null && String(item.datePublished).length > 0 ? { publishedAt: String(item.datePublished) } : {}),
-    }))),
+    sources: dedupe(raw.map((item: any): SearchSource =>
+      toSource(item?.url, item?.name, item?.snippet, item?.datePublished))),
   }
 }
 
@@ -522,12 +574,12 @@ export async function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: 
   return {
     sources: dedupe(raw.map((item: any): SearchSource => {
       const meta = item?.pagemap?.metatags?.[0] ?? {}
-      const pub = meta['article:published_time'] ?? item?.pagemap?.newsarticle?.[0]?.datepublished
+      const pub = normalizePublishedAt(meta['article:published_time'] ?? item?.pagemap?.newsarticle?.[0]?.datepublished)
       return {
         url: String(item?.link ?? '').trim(),
         ...(item?.title != null && String(item.title).length > 0 ? { title: String(item.title) } : {}),
         ...(item?.snippet != null && String(item.snippet).length > 0 ? { snippet: String(item.snippet) } : {}),
-        ...(pub != null && String(pub).length > 0 ? { publishedAt: String(pub) } : {}),
+        ...(pub !== undefined ? { publishedAt: pub } : {}),
       }
     })),
   }
@@ -548,13 +600,12 @@ const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSi
 
 const ENGINE_IDS: Array<keyof typeof ENGINES> = Object.keys(ENGINES) as Array<keyof typeof ENGINES>
 
-/** 清洗并截断 snippet：去 HTML 标签、折叠空白、限制长度。 */
+/** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
 export function cleanSnippet(text: string | undefined, max: number): string | undefined {
   if (text === undefined) return undefined
   let sn = String(text)
   sn = sn.replace(/<[^>]+>/g, ' ')
-  sn = sn.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/g, "'")
+  sn = decodeEntities(sn)
   sn = sn.replace(/[\t\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
   sn = sn.split(' | ').join(' ')
   sn = sn.replace(/(\s*[-=_]{2,}\s*)+/g, ' ').replace(/\s{2,}/g, ' ').trim()
@@ -611,10 +662,16 @@ export function sortByRelevance(sources: SearchSource[], query: string): SearchS
 /** 简单 TTL 内存缓存（省 key 额度，避免重复请求）。 */
 const cacheStore = new Map<string, { at: number; result: SearchResult }>()
 
-function cacheKeyOf(cfg: Config, query: string, maxResults: number): string {
+/** 当前配置涉及的全部引擎 endpoint（进缓存 key：换实例/镜像后不得命中旧结果）。 */
+function activeEndpointsOf(cfg: Config): string {
+  return [cfg.searxngBaseURL, cfg.tavilyEndpoint, cfg.serperEndpoint, cfg.braveEndpoint, cfg.bingEndpoint, cfg.googleEndpoint].join(',')
+}
+
+export function cacheKeyOf(cfg: Config, query: string, maxResults: number): string {
   return [cfg.provider, cfg.mergeResults ? 'm' : 'f', (cfg.fallbackProviders ?? []).join(','),
     String(cfg.maxProviderQueries), query, String(maxResults),
-    String(cfg.maxPerDomain ?? 0), cfg.relevanceSort ? 'r' : '', String(cfg.snippetMaxLength ?? 0)].join('|')
+    String(cfg.maxPerDomain ?? 0), cfg.relevanceSort ? 'r' : '', String(cfg.snippetMaxLength ?? 0),
+    activeEndpointsOf(cfg)].join('|')
 }
 
 function cacheGet(key: string, ttlMs: number): SearchResult | undefined {
@@ -654,7 +711,8 @@ async function cacheGetOrCompute(key: string, cfg: Config, compute: () => Promis
   return task
 }
 
-/** 带并发上限的并行执行：items 按序，fn 并发数 ≤ limit，结果保持原顺序。 */
+/** 带并发上限的并行执行：items 按序，fn 并发数 ≤ limit，结果保持原顺序。
+ *  任一 fn 抛错时停止派发新任务，等全部在途任务落定后抛出第一个错误（避免 unhandled rejection）。 */
 async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   if (limit <= 1) {
     const out: R[] = []
@@ -663,14 +721,23 @@ async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
   }
   const out: R[] = new Array(items.length)
   let i = 0
+  let stopped = false
+  let firstError: unknown
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) {
+    while (!stopped) {
       const idx = i++
       if (idx >= items.length) break
-      out[idx] = await fn(items[idx])
+      try {
+        out[idx] = await fn(items[idx])
+      } catch (error) {
+        firstError = error
+        stopped = true
+        break
+      }
     }
   })
-  await Promise.all(workers)
+  await Promise.allSettled(workers)
+  if (firstError !== undefined) throw firstError
   return out
 }
 
@@ -723,18 +790,33 @@ export function resetSearchStats(): void {
 }
 
 
-/** 同步判断某 provider 是否“可用”（key 是否已配）。searxng 恒可用。 */
-function hasConfiguredKey(cfg: Config, id: string): boolean {
-  switch (id) {
-    case 'searxng': return true
-    case 'tavily': return (cfg.tavilyApiKey ?? '').length > 0 || !!process.env[cfg.tavilyApiKeyEnv || 'TAVILY_API_KEY']
-    case 'serper': return (cfg.serperApiKey ?? '').length > 0 || !!process.env[cfg.serperApiKeyEnv || 'SERPER_API_KEY']
-    case 'brave': return (cfg.braveApiKey ?? '').length > 0 || !!process.env[cfg.braveApiKeyEnv || 'BRAVE_API_KEY']
-    case 'bing': return (cfg.bingApiKey ?? '').length > 0 || !!process.env[cfg.bingApiKeyEnv || 'BING_SEARCH_API_KEY']
-    case 'google-cse': return ((cfg.googleApiKey ?? '').length > 0 && (cfg.googleSearchEngineId ?? '').length > 0)
-      || (!!process.env[cfg.googleApiKeyEnv || 'GOOGLE_CSE_API_KEY'] && !!process.env[cfg.googleSearchEngineIdEnv || 'GOOGLE_CSE_ID'])
-    default: return false
+/** 内置 keyed 引擎的凭据描述（可用性探测与引擎实现共用同一套解析，避免两处漂移）。 */
+interface KeySpecResolver {
+  literal(cfg: Config): string | undefined
+  envRef(cfg: Config): string
+  envVar: string
+}
+
+const KEYED_SOURCE_SPECS: Record<string, KeySpecResolver> = {
+  tavily: { literal: (c) => c.tavilyApiKey, envRef: (c) => c.tavilyApiKeyEnv || 'TAVILY_API_KEY', envVar: 'TAVILY_API_KEY' },
+  serper: { literal: (c) => c.serperApiKey, envRef: (c) => c.serperApiKeyEnv || 'SERPER_API_KEY', envVar: 'SERPER_API_KEY' },
+  brave: { literal: (c) => c.braveApiKey, envRef: (c) => c.braveApiKeyEnv || 'BRAVE_API_KEY', envVar: 'BRAVE_API_KEY' },
+  bing: { literal: (c) => c.bingApiKey, envRef: (c) => c.bingApiKeyEnv || 'BING_SEARCH_API_KEY', envVar: 'BING_SEARCH_API_KEY' },
+}
+
+/** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
+ *  searxng 恒可用；未知的自定义源 id 默认视为可用。 */
+export async function builtinKeyAvailable(ctx: AppContext, cfg: Config, id: string): Promise<boolean> {
+  if (id === 'searxng') return true
+  if (id === 'google-cse') {
+    const key = await resolveApiKey(ctx, { literal: cfg.googleApiKey, envRef: cfg.googleApiKeyEnv || 'GOOGLE_CSE_API_KEY', envVar: 'GOOGLE_CSE_API_KEY' })
+    const cx = await resolveApiKey(ctx, { literal: cfg.googleSearchEngineId, envRef: cfg.googleSearchEngineIdEnv || 'GOOGLE_CSE_ID', envVar: 'GOOGLE_CSE_ID' })
+    return key !== undefined && key.length > 0 && cx !== undefined && cx.length > 0
   }
+  const spec = KEYED_SOURCE_SPECS[id]
+  if (spec === undefined) return true
+  const key = await resolveApiKey(ctx, { literal: spec.literal(cfg), envRef: spec.envRef(cfg), envVar: spec.envVar })
+  return key !== undefined && key.length > 0
 }
 
 /** 内置引擎的展示名（对外暴露给第三方作者参考）。 */
@@ -786,29 +868,44 @@ export class ProviderRegistry extends Service {
   list(): string[] { return [...this.sources.keys()] }
 }
 
-/** 把内置引擎包装成统一 adapter（内部用）。 */
-function builtinAdapter(ctx: AppContext, id: keyof typeof ENGINES, label: string): SearchSourceAdapter {
+/** 把内置引擎包装成统一 adapter（内部用；可用性由 buildProviderChain 走 credentials-aware 探测）。 */
+export function builtinAdapter(ctx: AppContext, id: keyof typeof ENGINES, label: string): SearchSourceAdapter {
   const fn = ENGINES[id]
   return {
     id: String(id),
     label,
-    available: (config) => hasConfiguredKey(config as unknown as Config, String(id)),
     search: async ({ query, maxResults, config }, signal) =>
       fn({ ctx, cfg: config as unknown as Config }, { query, maxResults }, signal),
   }
 }
 
-/** 构造要尝试的 provider 链：[主源, 其余可用源]，按注册表顺序，去重。 */
-export function buildProviderChain(cfg: Config, registry: ProviderRegistry): string[] {
+/** 构造要尝试的 provider 链：[主源, 显式 fallback, 其余可用源]，按注册表顺序，去重。
+ *  内置源的可用性与真实搜索走同一套凭据解析（credentials 服务里的 key 也算已配置）；
+ *  ctx 省略时退化为 adapter.available / 默认可用。 */
+export async function buildProviderChain(cfg: Config, registry: ProviderRegistry, ctx?: AppContext): Promise<string[]> {
   const chain: string[] = []
   const pushUnique = (id: string) => { if (!chain.includes(id)) chain.push(id) }
   pushUnique(cfg.provider)
   for (const id of cfg.fallbackProviders ?? []) pushUnique(id)
   for (const [id, adapter] of [...registry.sources.entries()].sort()) {
     if (chain.includes(id)) continue
-    if (adapter.available?.(cfg as unknown as Record<string, unknown>) ?? true) pushUnique(id)
+    if (adapter.available !== undefined) {
+      if (!adapter.available(cfg as unknown as Record<string, unknown>)) continue
+    } else if (ctx !== undefined && !(await builtinKeyAvailable(ctx, cfg, id))) {
+      continue
+    }
+    pushUnique(id)
   }
   return chain
+}
+
+/** 把 controller 的中止原因包装成 WEB_ABORTED（超时 / 用户取消共用）。 */
+function abortErrorOf(controller: AbortController): WebError {
+  const reason: unknown = controller.signal.reason
+  const detail = reason instanceof Error
+    ? reason.message
+    : (typeof reason === 'string' && reason.length > 0 ? reason : 'search aborted')
+  return new WebError('web-search-thirdparty: ' + detail, 'WEB_ABORTED')
 }
 
 export class ThirdPartySearchProvider implements SearchProvider {
@@ -844,11 +941,12 @@ export class ThirdPartySearchProvider implements SearchProvider {
 
     try {
       const compute = async (): Promise<SearchResult> => {
-        const chain = buildProviderChain(r.cfg, registry as ProviderRegistry)
-        let targets = r.cfg.mergeResults ? chain.slice(0, Math.max(1, r.cfg.maxProviderQueries)) : chain
+        const chain = await buildProviderChain(r.cfg, registry as ProviderRegistry, r.ctx)
+        // 查询预算（含主源）对合并与降级两种模式统一生效，防止主源失败后无限烧各引擎配额
+        const targets = chain.slice(0, Math.max(1, r.cfg.maxProviderQueries))
         // 熔断：跳过处于冷却期且非主源的 provider（主源仍尝试，以便冷却恢复后自愈）
         const primary = r.cfg.provider
-        targets = targets.filter((id) => id === primary || !circuitOpen(r.cfg, id))
+        const planned = targets.filter((id) => id === primary || !circuitOpen(r.cfg, id))
 
         const failures: Array<{ id: string; msg: string }> = []
         const sources: SearchSource[] = []
@@ -858,6 +956,7 @@ export class ThirdPartySearchProvider implements SearchProvider {
         const runOne = async (id: string): Promise<{ sources: SearchSourceItem[]; content?: string }> => {
           const adapter = registry.sources.get(id)
           if (adapter === undefined) return { sources: [] }
+          if (controller.signal.aborted) throw abortErrorOf(controller)
           const started = Date.now()
           try {
             const result = await adapter.search(
@@ -868,6 +967,10 @@ export class ThirdPartySearchProvider implements SearchProvider {
             if (r.cfg.statsEnabled) recordStat(id, true, Date.now() - started)
             return { sources: result.sources ?? [], content: result.content }
           } catch (error) {
+            // 取消/超时不计入源失败（不污染熔断与统计）：终止整条链并原样上抛 WEB_ABORTED
+            if (controller.signal.aborted || (error instanceof WebError && error.code === 'WEB_ABORTED')) {
+              throw error instanceof WebError && error.code === 'WEB_ABORTED' ? error : abortErrorOf(controller)
+            }
             const msg = error instanceof Error ? error.message : String(error)
             circuitMarkFailure(r.cfg, id)
             if (r.cfg.statsEnabled) recordStat(id, false, Date.now() - started, msg)
@@ -877,7 +980,7 @@ export class ThirdPartySearchProvider implements SearchProvider {
         }
 
         if (r.cfg.mergeResults) {
-          const collected = await runWithConcurrency(targets, r.cfg.maxProviderConcurrency, runOne)
+          const collected = await runWithConcurrency(planned, r.cfg.maxProviderConcurrency, runOne)
           for (const c of collected) {
             for (const src of c.sources) {
               if (!src.url || seen.has(src.url)) continue
@@ -887,7 +990,7 @@ export class ThirdPartySearchProvider implements SearchProvider {
             if (content === undefined && c.content !== undefined) content = c.content
           }
         } else {
-          for (const id of targets) {
+          for (const id of planned) {
             const c = await runOne(id)
             for (const src of c.sources) {
               if (!src.url || seen.has(src.url)) continue
@@ -903,15 +1006,17 @@ export class ThirdPartySearchProvider implements SearchProvider {
           throw new WebError('web-search-thirdparty: 所有可用搜索源均失败 — ' + failures[0].id + ':' + failures[0].msg, 'WEB_PROVIDER_ERROR')
         }
 
-        let cleaned = sources.slice(0, maxResults).map((src) => ({
-          ...src,
-          ...(src.snippet !== undefined ? { snippet: cleanSnippet(src.snippet, r.cfg.snippetMaxLength) } : {}),
-        }))
-        cleaned = dedupeByDomain(cleaned, r.cfg.maxPerDomain)
-        if (r.cfg.relevanceSort) cleaned = sortByRelevance(cleaned, request.query)
+        // 处理顺序：域名限额 → 相关度排序 → 截断到 maxResults。
+        // 先截断会让域名限额把结果砍穿、相关度排序也只在残集里做。
+        let processed = dedupeByDomain(sources, r.cfg.maxPerDomain)
+        if (r.cfg.relevanceSort) processed = sortByRelevance(processed, request.query)
+        processed = processed.slice(0, maxResults)
 
         return {
-          sources: cleaned,
+          sources: processed.map((src) => ({
+            ...src,
+            ...(src.snippet !== undefined ? { snippet: cleanSnippet(src.snippet, r.cfg.snippetMaxLength) } : {}),
+          })),
           ...(content !== undefined ? { content } : {}),
           truncated: false,
         } as SearchResult
@@ -1005,8 +1110,22 @@ function registerTestRoute(ctx: AppContext, current: () => Config): void {
           sendJson(res, 200, { ok: false, message: '未知供应商: ' + provider })
           return
         }
-        const r: Resolved = { ctx, cfg: cfgFromTestBody(current(), body) }
         const started = Date.now()
+        const r: Resolved = { ctx, cfg: cfgFromTestBody(current(), body) }
+        // 测试表单里的 url 是浏览器侧可控输入：必须过 SSRF 校验，防止宿主被当跳板探测内网
+        if (provider === 'searxng' && r.cfg.searxngBaseURL.length > 0) {
+          try {
+            await assertPublicUrl(new URL(r.cfg.searxngBaseURL), r.cfg)
+          } catch (error) {
+            sendJson(res, 200, {
+              ok: false,
+              provider,
+              latencyMs: Date.now() - started,
+              message: error instanceof Error ? error.message : String(error),
+            })
+            return
+          }
+        }
         try {
           const result = await engine(r, { query: 'test', maxResults: 1 }, undefined)
           const latencyMs = Date.now() - started
@@ -1036,46 +1155,129 @@ function registerTestRoute(ctx: AppContext, current: () => Config): void {
 }
 
 
-function isPrivateIp(addr: string): boolean {
+/** 剥掉 IPv6 字面量的方括号（URL.hostname 对 IPv6 返回 “[::1]” 形式，不剥会绕过所有前缀判断）。 */
+function stripHostBrackets(host: string): string {
+  const h = host.toLowerCase().trim()
+  return h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h
+}
+
+export function isPrivateIp(addr: string): boolean {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr)
   if (v4 !== null) {
     const a = Number(v4[1]); const b = Number(v4[2]); const c = Number(v4[3]); const d = Number(v4[4])
-    if (a === 10) return true
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true // 非法段按不可信处理
+    if (a === 0 || a === 10 || a === 127) return true // this-network / 私网 / 环回
     if (a === 172 && b >= 16 && b <= 31) return true
     if (a === 192 && b === 168) return true
-    if (a === 127) return true
-    if (a === 169 && b === 254) return true
-    if (a === 100 && b >= 64 && b <= 127) return true
+    if (a === 169 && b === 254) return true // link-local（云元数据）
+    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
     return false
   }
   const lower = addr.toLowerCase()
   if (lower === '::1' || lower === '::') return true
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true
-  if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true
-  if (lower.startsWith('::ffff:')) return isPrivateIp(lower.slice(7))
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true // ULA fc00::/7
+  if (/^fe[89ab]/.test(lower)) return true // link-local fe80::/10
+  if (lower.startsWith('::ffff:')) {
+    // IPv4-mapped：::ffff:a.b.c.d 点分形式，或 WHATWG 压缩后的十六进制 ::ffff:7f00:1
+    const tail = lower.slice(7)
+    if (tail.includes('.')) return isPrivateIp(tail)
+    const parts = tail.split(':')
+    if (parts.length === 2) {
+      const hi = Number.parseInt(parts[0], 16)
+      const lo = Number.parseInt(parts[1], 16)
+      if (Number.isFinite(hi) && Number.isFinite(lo) && hi >= 0 && hi <= 0xffff && lo >= 0 && lo <= 0xffff) {
+        return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`)
+      }
+    }
+    return true // 无法识别的映射形态一律按私网处理（保守拒绝）
+  }
   return false
 }
 
-function isPrivateName(host: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, '')
+export function isPrivateName(host: string): boolean {
+  const h = stripHostBrackets(host).replace(/\.$/, '')
+  if (h.length === 0) return true
   if (h === 'localhost' || h.endsWith('.localhost')) return true
   if (h === 'metadata.google.internal' || h === 'instance-data') return true
   if (/^\d|^[0-9a-f:]+$/i.test(h)) return isPrivateIp(h)
   return false
 }
 
-async function assertPublicUrl(url: URL, cfg: Config): Promise<void> {
+export async function assertPublicUrl(url: URL, cfg: Config): Promise<void> {
   if (cfg.fetchAllowPrivate) return
-  const host = url.hostname
-  if (isPrivateName(host)) throw new WebError('blocked private / loopback address: ' + host, 'WEB_FETCH_BLOCKED_PRIVATE')
+  const host = stripHostBrackets(url.hostname)
+  if (host.length === 0 || isPrivateName(host)) {
+    throw new WebError('blocked private / loopback address: ' + host, 'WEB_FETCH_BLOCKED_PRIVATE')
+  }
   try {
+    // IP 字面量在 node:dns 中原样返回，同样会被复查一遍
     const addrs = await dnsLookup(host, { all: true })
-    for (const a of addrs) if (isPrivateIp(a.address)) throw new WebError('blocked private network address: ' + a.address + ' (' + host + ')', 'WEB_FETCH_BLOCKED_PRIVATE')
+    for (const a of addrs) {
+      if (isPrivateIp(a.address)) {
+        throw new WebError('blocked private network address: ' + a.address + ' (' + host + ')', 'WEB_FETCH_BLOCKED_PRIVATE')
+      }
+    }
   } catch (error) {
     if (error instanceof WebError) throw error
+    // DNS 解析失败不再放行：解析路径不一致正是 rebinding 的入口，宁可保守拒绝
+    throw new WebError('blocked: DNS resolution failed for "' + host + '"', 'WEB_FETCH_BLOCKED_PRIVATE', { cause: error })
   }
 }
 
+/** 手动逐跳跟随重定向（默认 follow 不会复查 Location），每一跳都重新过 SSRF 校验。 */
+const MAX_REDIRECT_HOPS = 5
+
+async function fetchManualRedirects(target: URL, headers: Record<string, string>, cfg: Config, signal: AbortSignal): Promise<Response> {
+  let current = target
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    await assertPublicUrl(current, cfg)
+    const res = await fetch(current, { method: 'GET', signal, redirect: 'manual', headers })
+    const location = res.headers.get('location')
+    if (location === null || res.status < 300 || res.status >= 400) return res
+    try { await res.arrayBuffer() } catch { /* 释放连接 */ }
+    if (hop === MAX_REDIRECT_HOPS) {
+      throw new WebError(`too many redirects (> ${MAX_REDIRECT_HOPS})`, 'WEB_PROVIDER_ERROR')
+    }
+    let next: URL
+    try {
+      next = new URL(location, current)
+    } catch {
+      throw new WebError('invalid redirect location: ' + location, 'WEB_PROVIDER_ERROR')
+    }
+    if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+      throw new WebError(`redirect to unsupported protocol "${next.protocol}"`, 'WEB_PROVIDER_ERROR')
+    }
+    current = next
+  }
+  throw new WebError(`too many redirects (> ${MAX_REDIRECT_HOPS})`, 'WEB_PROVIDER_ERROR')
+}
+
+
+/** 常用命名实体（其余走数字/十六进制通用解码）。 */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  copy: '©', reg: '®', trade: '™', hellip: '…', mdash: '—', ndash: '–',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', laquo: '«', raquo: '»',
+  middot: '·', bull: '•', deg: '°', plusmn: '±', times: '×', divide: '÷',
+  euro: '€', pound: '£', yen: '¥', cent: '¢', sect: '§', para: '¶', eacute: 'é',
+}
+
+/** 通用 HTML 实体解码：命名 + &#123; 十进制 + &#x1F; 十六进制；未知实体原样保留。 */
+export function decodeEntities(input: string): string {
+  return input.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
+    if (body.startsWith('#')) {
+      // body 形如 "#x4e2d" / "#39"：十六进制标记在 # 之后
+      const code = /^#[xX]/.test(body)
+        ? Number.parseInt(body.slice(2), 16)
+        : Number.parseInt(body.slice(1), 10)
+      if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
+        try { return String.fromCodePoint(code) } catch { return m }
+      }
+      return m
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? m
+  })
+}
 
 function stripInlineTags(html: string): string {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
@@ -1092,7 +1294,7 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m: unknown, href: string, txt: string) => '[' + stripInlineTags(txt) + '](' + href + ')')
   s = s.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m: unknown, lvl: string, txt: string) => '#'.repeat(Number(lvl)) + ' ' + stripInlineTags(txt) + '\n')
   s = s.replace(/<[^>]+>/g, ' ')
-  s = s.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/&apos;/gi, "'")
+  s = decodeEntities(s)
   s = s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim()
   return s
 }
@@ -1117,18 +1319,20 @@ export class LocalFetchProvider implements WebFetchProvider {
       throw new WebError(`unsupported protocol "${url.protocol}" — only http(s) allowed`, 'WEB_PROVIDER_ERROR')
     }
     const r = this.resolveOptions()
-    await assertPublicUrl(url, r.cfg)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(new Error(`web fetch timeout after ${r.cfg.fetchTimeoutMs}ms`)), r.cfg.fetchTimeoutMs)
     const onAbort = () => controller.abort(signal?.reason)
     signal?.addEventListener('abort', onAbort, { once: true })
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        signal: controller.signal,
-        headers: { 'user-agent': r.cfg.fetchUserAgent, 'accept': 'text/html,text/*;q=0.9,application/json;q=0.8' },
-      })
-      const rawText = await res.text()
+      // 逐跳跟随重定向，每一跳都过 SSRF 校验（公网 URL 302 到私网也会被拦下）
+      const res = await fetchManualRedirects(url, {
+        'user-agent': r.cfg.fetchUserAgent,
+        'accept': 'text/html,text/*;q=0.9,application/json;q=0.8',
+      }, r.cfg, controller.signal)
+      // 先粗剪原始文本再转换：htmlToMarkdown 的多趟正则不该吃整份超大页面
+      const parseLimit = Math.max(r.cfg.fetchMaxBodyChars * 8, 200_000)
+      let rawText = await res.text()
+      if (rawText.length > parseLimit) rawText = rawText.slice(0, parseLimit)
       const isHtml = /html/i.test(String(res.headers.get('content-type') ?? '')) || /^\s*</.test(rawText)
       let content = isHtml ? htmlToMarkdown(rawText) : rawText
       const truncated = content.length > r.cfg.fetchMaxBodyChars

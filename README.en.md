@@ -41,6 +41,8 @@ DSH's built-in web search only talks to the official DeepSeek API. This plugin l
 | `bing` | Bing Web Search | yes | `bingApiKey` / `BING_SEARCH_API_KEY` |
 | `google-cse` | Google Custom Search | yes (key + cx) | `googleApiKey` + `googleSearchEngineId` |
 
+> Note: Microsoft retired the Bing Web Search API in 2025. The `bing` engine is kept for endpoints that stay protocol-compatible (e.g. Azure Grounding gateways or self-hosted mirrors) — point `bingEndpoint` at your target.
+
 Keys can be set in the settings UI, stored in the DSH credentials service, or exported as environment variables.
 
 ## Install

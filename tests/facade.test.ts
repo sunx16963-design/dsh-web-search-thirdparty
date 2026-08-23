@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { ThirdPartySearchProvider, ProviderRegistry, resetSearchStats, getSearchStats, PROVIDER_SERVICE_ID } from '../src/index'
+import {
+  ThirdPartySearchProvider, ProviderRegistry, buildProviderChain, builtinAdapter,
+  cacheKeyOf, resetSearchStats, getSearchStats, PROVIDER_SERVICE_ID,
+} from '../src/index'
 
 function mkAdapter(id: string, search: any, available = () => true) {
   return { id, label: id, available, search }
@@ -25,6 +28,11 @@ function cfg(over: any = {}) {
 function makeProvider(registry: any, c: any) {
   const ctx = { get: (n: string) => (n === PROVIDER_SERVICE_ID ? registry : undefined), web: {} }
   return new ThirdPartySearchProvider(() => ({ ctx, cfg: c }))
+}
+
+function mkRegistry(ctx: any, entries: Array<[string, any]>) {
+  const sources = new Map(entries)
+  return { sources, list: () => [...sources.keys()] }
 }
 
 describe('facade behavior', () => {
@@ -73,6 +81,20 @@ describe('facade behavior', () => {
     expect(res.sources[0].title).toBe('Gamma term here')
   })
 
+  it('dedupes by domain and sorts BEFORE slicing to maxResults', async () => {
+    // 6 条结果里相关的那条排在最后：先截断的话它永远进不了返回集
+    const items: any[] = []
+    for (let i = 1; i <= 5; i++) items.push({ url: 'https://a.example/' + i, title: 'plain ' + i })
+    items.push({ url: 'https://b.example/1', title: 'gamma needle here' })
+    const sources = new Map<string, any>()
+    sources.set('sev', mkAdapter('sev', async () => ({ sources: items })))
+    const c = cfg({ provider: 'sev', maxPerDomain: 2, relevanceSort: true, cacheEnabled: false })
+    const res = await makeProvider({ sources, list: () => ['sev'] }, c).search({ query: 'needle gamma', maxResults: 4 })
+    expect(res.sources[0].url).toBe('https://b.example/1')
+    const aCount = res.sources.filter((s: any) => s.url.startsWith('https://a.example')).length
+    expect(aCount).toBe(2) // 域名限额 2 条 + b.example 补位
+  })
+
   it('coalesces concurrent identical queries (stampede protection)', async () => {
     let calls = 0
     const sources = new Map<string, any>()
@@ -113,18 +135,6 @@ describe('facade behavior', () => {
     expect(st.bad.errors).toBe(1)
     expect(st.bad.lastError).toContain('bad')
   })
-})
-
-  it('cache key includes post-processing options (maxPerDomain)', async () => {
-    let calls = 0
-    const sources = new Map<string, any>()
-    sources.set('sev', mkAdapter('sev', async () => { calls++; return { sources: [{ url: 'https://c/1' }] } }))
-    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
-    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
-    expect(calls).toBe(1) // 同配置命中缓存
-    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true, maxPerDomain: 0 })).search({ query: 'q', maxResults: 5 })
-    expect(calls).toBe(2) // maxPerDomain 变了 → 新缓存 key，重新请求
-  })
 
   it('stats avgLatencyMs uses success count (0 when all failed)', async () => {
     resetSearchStats()
@@ -137,6 +147,98 @@ describe('facade behavior', () => {
     expect(st.bad.avgLatencyMs).toBe(0)
     expect(st.good.avgLatencyMs).toBeGreaterThanOrEqual(0)
   })
+
+  it('caps fallback attempts by maxProviderQueries in non-merge mode too', async () => {
+    const calls: string[] = []
+    const mkFail = (id: string) => mkAdapter(id, async () => { calls.push(id); throw new Error(id + ' down') })
+    const sources = new Map<string, any>()
+    sources.set('p1', mkFail('p1'))
+    sources.set('f1', mkFail('f1'))
+    sources.set('ok', mkAdapter('ok', async () => { calls.push('ok'); return { sources: [{ url: 'https://ok/1' }] } }))
+    const c = cfg({ provider: 'p1', fallbackProviders: [], maxProviderQueries: 2, cacheEnabled: false })
+    await expect(
+      makeProvider({ sources, list: () => ['p1', 'f1', 'ok'] }, c).search({ query: 'q', maxResults: 5 }),
+    ).rejects.toThrowError(/所有可用搜索源均失败/)
+    // 预算 2（主源 + 1 个降级源）：第 3 个可用源不应被消耗
+    expect(calls).toEqual(['p1', 'f1'])
+  })
+
+  it('propagates abort instead of reporting all-sources-failed', async () => {
+    const calls: string[] = []
+    const sources = new Map<string, any>()
+    sources.set('slow', {
+      id: 'slow', label: 'slow',
+      search: (_i: any, signal?: AbortSignal) => new Promise((_res, rej) => {
+        signal?.addEventListener('abort', () => rej(new Error('stalled')), { once: true })
+      }),
+    })
+    sources.set('backup', mkAdapter('backup', async () => { calls.push('backup'); return { sources: [{ url: 'https://y/1' }] } }))
+    const c = cfg({ provider: 'slow', fallbackProviders: ['backup'], timeoutMs: 60, cacheEnabled: false })
+    await expect(
+      makeProvider({ sources, list: () => ['slow', 'backup'] }, c).search({ query: 'x', maxResults: 5 }),
+    ).rejects.toMatchObject({ code: 'WEB_ABORTED' })
+    expect(calls).toEqual([]) // 超时后不再继续烧降级链
+  })
+})
+
+describe('cache key', () => {
+  it('includes post-processing options (maxPerDomain)', async () => {
+    let calls = 0
+    const sources = new Map<string, any>()
+    sources.set('sev', mkAdapter('sev', async () => { calls++; return { sources: [{ url: 'https://c/1' }] } }))
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true })).search({ query: 'q', maxResults: 5 })
+    expect(calls).toBe(1) // 同配置命中缓存
+    await makeProvider({ sources, list: () => ['sev'] }, cfg({ cacheEnabled: true, maxPerDomain: 0 })).search({ query: 'q', maxResults: 5 })
+    expect(calls).toBe(2) // maxPerDomain 变了 → 新缓存 key，重新请求
+  })
+
+  it('diverges when an engine endpoint changes (switching instances must not hit stale cache)', () => {
+    const base = cfg()
+    expect(cacheKeyOf(base, 'q', 8)).toBe(cacheKeyOf({ ...base }, 'q', 8))
+    expect(cacheKeyOf(base, 'q', 8))
+      .not.toBe(cacheKeyOf({ ...base, searxngBaseURL: 'http://self-hosted:8888' }, 'q', 8))
+    expect(cacheKeyOf(base, 'q', 8))
+      .not.toBe(cacheKeyOf({ ...base, tavilyEndpoint: 'http://mirror/tavily' }, 'q', 8))
+  })
+})
+
+describe('provider chain availability', () => {
+  function fakeRegistryCtx() {
+    return { effect: (fn: any) => { const d = fn(); return () => d?.() } }
+  }
+
+  it('includes keyed sources whose key lives only in the credentials service', async () => {
+    const credentials = { resolve: async () => ({ value: 'from-credentials' }) }
+    const reg = new ProviderRegistry(fakeRegistryCtx() as any)
+    reg.register(builtinAdapter({} as any, 'searxng', 'SearXNG'))
+    reg.register(builtinAdapter({} as any, 'tavily', 'Tavily'))
+    const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
+    const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
+    const chain = await buildProviderChain(c, reg, ctx as any)
+    expect(chain).toContain('tavily')
+  })
+
+  it('excludes keyed sources without any resolvable credential', async () => {
+    const credentials = { resolve: async () => { throw new Error('no such credential') } }
+    const reg = new ProviderRegistry(fakeRegistryCtx() as any)
+    reg.register(builtinAdapter({} as any, 'searxng', 'SearXNG'))
+    reg.register(builtinAdapter({} as any, 'tavily', 'Tavily'))
+    const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
+    const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
+    const chain = await buildProviderChain(c, reg, ctx as any)
+    expect(chain).toEqual(['searxng'])
+  })
+
+  it('respects adapter-provided sync available() for custom sources', async () => {
+    const reg = new ProviderRegistry(fakeRegistryCtx() as any)
+    reg.register(mkAdapter('off', async () => ({ sources: [] }), () => false))
+    reg.register(mkAdapter('on', async () => ({ sources: [] }), () => true))
+    const chain = await buildProviderChain(cfg({ provider: 'searxng' }), reg as any)
+    expect(chain).toContain('on')
+    expect(chain).not.toContain('off')
+  })
+})
 
 describe('ProviderRegistry duplicate id', () => {
   it('rejects registering the same id twice', () => {

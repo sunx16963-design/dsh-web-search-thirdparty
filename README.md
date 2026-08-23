@@ -39,6 +39,8 @@ DSH 自带的网页搜索只能对接官方 DeepSeek 接口。这个插件让你
 | `serper` | Serper（Google SERP） | 是 | `serperApiKey` / `SERPER_API_KEY` |
 | `brave` | Brave Search | 是 | `braveApiKey` / `BRAVE_API_KEY` |
 | `bing` | Bing Web Search | 是 | `bingApiKey` / `BING_SEARCH_API_KEY` |
+
+> 注：微软 Bing Web Search API 已于 2025 年退役。`bing` 引擎保留用于对接兼容其协议的替代 endpoint（如 Azure Grounding 网关或自建镜像），可通过 `bingEndpoint` 配置指向。
 | `google-cse` | Google 自定义搜索 | 是（key + cx） | `googleApiKey` + `googleSearchEngineId` |
 
 key 可以在设置页直接填写、写入 DSH credentials 服务，或通过环境变量导出。

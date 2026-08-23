@@ -1,6 +1,6 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest'
 import { createServer, Server } from 'node:http'
-import { searchSearxng, searchTavily, searchBrave } from '../src/index'
+import { searchSearxng, searchTavily, searchSerper, searchBrave } from '../src/index'
 
 let server: Server
 const captured: any = {}
@@ -30,7 +30,19 @@ beforeAll(async () => {
     } else if (u.pathname === '/tavily') {
       let b = ''
       req.on('data', (c: Buffer) => (b += c))
-      req.on('end', () => { captured.tavily = JSON.parse(b || '{}'); res.end(JSON.stringify({ answer: 'ans', results: [{ url: 'https://t/1', title: 'TV', content: 'tavily snippet', published_date: '2026-01-01' }] })) })
+      req.on('end', () => {
+        captured.tavily = JSON.parse(b || '{}')
+        captured.tavilyAuth = req.headers['authorization']
+        res.end(JSON.stringify({ answer: 'ans', results: [{ url: 'https://t/1', title: 'TV', content: 'tavily snippet', published_date: '2026-01-01' }] }))
+      })
+    } else if (u.pathname === '/serper') {
+      let b = ''
+      req.on('data', (c: Buffer) => (b += c))
+      req.on('end', () => {
+        captured.serper = JSON.parse(b || '{}')
+        captured.serperKey = req.headers['x-api-key']
+        res.end(JSON.stringify({ organic: [{ link: 'https://sp/1', title: 'SP', snippet: 'serper snippet', date: '2026-02-03' }] }))
+      })
     } else if (u.pathname === '/brave') {
       captured.brave = { token: req.headers['x-subscription-token'], country: u.searchParams.get('country'), search_lang: u.searchParams.get('search_lang'), q: u.searchParams.get('q') }
       res.end(JSON.stringify({ web: { results: [{ url: 'https://b/1', title: 'BR', description: 'brave snippet' }] } }))
@@ -52,12 +64,24 @@ describe('searxng engine', () => {
 })
 
 describe('tavily engine', () => {
-  it('sends search_depth and maps answer to content', async () => {
+  it('sends Bearer auth + search_depth and maps answer to content', async () => {
     const res = await searchTavily({ ctx: {}, cfg: cfg({ tavilySearchDepth: 'advanced' }) }, { query: 'q', maxResults: 3 })
     expect(captured.tavily.search_depth).toBe('advanced')
-    expect(captured.tavily.apikey ?? captured.tavily.api_key).toBe('k')
+    expect(captured.tavilyAuth).toBe('Bearer k')
+    expect(captured.tavily.api_key).toBeUndefined() // key 不再进请求体
     expect(res.content).toBe('ans')
-    expect(res.sources[0].publishedAt).toBe('2026-01-01')
+    expect(res.sources[0].publishedAt).toBe('2026-01-01T00:00:00.000Z')
+  })
+})
+
+describe('serper engine', () => {
+  it('sends num for result count and normalizes organic results', async () => {
+    const res = await searchSerper({ ctx: {}, cfg: cfg({ serperEndpoint: 'http://127.0.0.1:9333/serper', serperApiKey: 'sk', serperLanguage: 'us' }) }, { query: 'q', maxResults: 5 })
+    expect(captured.serper.num).toBe(5)
+    expect(captured.serper.gl).toBe('us')
+    expect(captured.serperKey).toBe('sk')
+    expect(res.sources[0].url).toBe('https://sp/1')
+    expect(res.sources[0].publishedAt).toBe('2026-02-03T00:00:00.000Z')
   })
 })
 

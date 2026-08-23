@@ -9,6 +9,10 @@ beforeAll(async () => {
     if (u.pathname === '/plain') {
       res.setHeader('content-type', 'text/plain')
       res.end('x'.repeat(5000))
+    } else if (u.pathname === '/redirect') {
+      res.statusCode = 302
+      res.setHeader('location', '/plain')
+      res.end()
     } else {
       res.setHeader('content-type', 'text/html; charset=utf-8')
       res.end('<h1>Hello</h1><p>World <a href="https://example.com/x">link text</a></p><br><ul><li>item</li></ul>')
@@ -68,5 +72,20 @@ describe('SSRF guard', () => {
     const p = makeProvider({ fetchAllowPrivate: true })
     const res = await p.fetch({ url: 'http://127.0.0.1:9555/' })
     expect(res.statusCode).toBe(200)
+  })
+  it('blocks IPv6 loopback written with brackets (URL.hostname keeps them)', async () => {
+    const p = makeProvider({ fetchAllowPrivate: false })
+    await expect(p.fetch({ url: 'http://[::1]:9555/' })).rejects.toThrowError(/private|loopback/i)
+  })
+  it('blocks IPv4-mapped IPv6 in compressed hex form', async () => {
+    // WHATWG 会把 [::ffff:127.0.0.1] 规范化成 [::ffff:7f00:1]，必须照样识别
+    const p = makeProvider({ fetchAllowPrivate: false })
+    await expect(p.fetch({ url: 'http://[::ffff:127.0.0.1]:9555/' })).rejects.toThrowError(/private|loopback/i)
+  })
+  it('follows redirects manually and validates each hop', async () => {
+    const p = makeProvider({ fetchAllowPrivate: true })
+    const res = await p.fetch({ url: 'http://127.0.0.1:9555/redirect' })
+    expect(res.statusCode).toBe(200)
+    expect(res.body.content).toContain('xxx')
   })
 })
