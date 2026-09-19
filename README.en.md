@@ -98,12 +98,14 @@ dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
 ```sh
-# Option 3: build locally, then install
+# Option 3: build locally (copy the build INTO the profile first — see the warning below)
 git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install
 npm run build
-dshpm install /path/to/dsh-web-search-thirdparty --profile web
+# Crucial: the target must live inside the profile, or the link cannot reach the host packages
+cp -r . "$DSH_HOME/profiles/web/vendor/dsh-web-search-thirdparty"
+dshpm install "$DSH_HOME/profiles/web/vendor/dsh-web-search-thirdparty" --profile web
 ```
 
 Restart `dsh web` after installing so the settings page appears. Upgrade / uninstall:
@@ -112,6 +114,30 @@ Restart `dsh web` after installing so the settings page appears. Upgrade / unins
 dshpm update dsh-web-search-thirdparty --profile web
 dshpm remove dsh-web-search-thirdparty --profile web
 ```
+
+### Two install gotchas (measured)
+
+**1) git / local sources make the quality gate pause and ask for keys — just answer empty.**
+This plugin needs **no keys at install or build time** (keys are entered in the settings page). But the
+manager scans READMEs for `XXX_API_KEY` / `xxxApiKey`-shaped names (capped at 8, which is why exactly
+tavily/serper/brave/bing show up), treats them as install-time env requirements, and pauses. Re-run with
+`--env KEY=` (empty = skip), e.g.:
+
+```sh
+dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web \
+  --env tavilyApiKey= --env TAVILY_API_KEY= --env serperApiKey= --env SERPER_API_KEY= \
+  --env braveApiKey= --env BRAVE_API_KEY= --env bingApiKey= --env BING_SEARCH_API_KEY=
+```
+
+**2) A local path outside the profile directory breaks the whole profile at boot.**
+`dshpm install /abs/path/outside` records `link:/that/path`; the plugin resolves `@deepseek-ai/*` from its
+own location (the host provides them through `profiles/node_modules`), so an out-of-profile target cannot
+reach them and boot fails with
+`failed to import loader entry … Cannot find package '@deepseek-ai/cordis'` — **the profile will not start**.
+Copy the build into `profiles/<name>/vendor/` before installing (as option 3 does).
+Also note: when the package name is published on npm, a `github:` source is mapped to the **npm version**
+(the log says "installed from npm"), so a stale npm release wins over the repo; and a `.tgz` path is not
+supported by this manager version.
 
 ## Configuration
 

@@ -93,12 +93,14 @@ dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web
 ```
 
 ```sh
-# 方式三：本地构建后安装
+# 方式三：本地构建（先把构建产物放进 profile 内，再安装 —— 见下方警告）
 git clone https://github.com/sunx16963-design/dsh-web-search-thirdparty.git
 cd dsh-web-search-thirdparty
 npm install
 npm run build
-dshpm install /本地路径/dsh-web-search-thirdparty --profile web
+# 关键：拷贝到 profile 目录内部（target 在 profile 内，链接才能解析到宿主包）
+cp -r . "$DSH_HOME/profiles/web/vendor/dsh-web-search-thirdparty"
+dshpm install "$DSH_HOME/profiles/web/vendor/dsh-web-search-thirdparty" --profile web
 ```
 
 安装后重启 `dsh web`，设置页才会出现。卸载 / 升级：
@@ -107,6 +109,29 @@ dshpm install /本地路径/dsh-web-search-thirdparty --profile web
 dshpm update dsh-web-search-thirdparty --profile web
 dshpm remove dsh-web-search-thirdparty --profile web
 ```
+
+### 安装时的两个注意点（实测）
+
+**1）git / 本地源安装会被质量门暂停询问密钥 —— 直接留空跳过。**
+本插件安装与构建**不需要任何密钥**（密钥在设置页里填）。但管理器会扫描 README 里出现的
+`XXX_API_KEY` / `xxxApiKey` 形态名称（上限 8 个，所以恰好是 tavily/serper/brave/bing 这些），
+把它们当成"安装期需要的环境变量"并暂停询问。按提示补 `--env KEY=`（空值即跳过）再跑一次即可，
+例如：
+
+```sh
+dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web \
+  --env tavilyApiKey= --env TAVILY_API_KEY= --env serperApiKey= --env SERPER_API_KEY= \
+  --env braveApiKey= --env BRAVE_API_KEY= --env bingApiKey= --env BING_SEARCH_API_KEY=
+```
+
+**2）本地路径必须落在 profile 目录内部，否则整个 profile 会启动失败。**
+`dshpm install /repo/之外的绝对路径` 会写成 `link:/那个路径`；插件代码是按它自己的位置解析
+`@deepseek-ai/*` 的（宿主通过 `profiles/node_modules` 提供这些包），路径在 profile 外时解析链
+够不到宿主包，启动时报
+`failed to import loader entry … Cannot find package '@deepseek-ai/cordis'`，**整个 profile 起不来**。
+所以本地安装请把构建产物放进 `profiles/<name>/vendor/` 之后再 `dshpm install`（上面方式三就是这么做的）。
+另外：`github:` 源在包已发布于 npm 时会被管理器映射到 **npm 版本**（日志会写 "installed from npm"），
+所以 npm 上的版本落后时，github 安装拿到的是 npm 上那个版本；`.tgz` 路径则不被该管理器支持。
 
 ## 配置
 
