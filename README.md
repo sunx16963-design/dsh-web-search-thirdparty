@@ -7,14 +7,16 @@
 
 基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 开发。
 
+[![ci](https://github.com/sunx16963-design/dsh-web-search-thirdparty/actions/workflows/ci.yml/badge.svg)](https://github.com/sunx16963-design/dsh-web-search-thirdparty/actions/workflows/ci.yml)
+
 ## 版本与兼容
 
 插件同时适配 DSH 两代设置 API（运行时探测，无需你选择）：
 
 | DSH 版本 | 状态 | 说明 |
 | --- | --- | --- |
-| `0.1.0-rc.6` … `0.1.1-rc.2` | 支持 | 使用顶层 `installSettingsSection` |
-| `>= 0.1.2`（含 `0.1.5-rc.2`） | 支持 | 使用 `ctx.settings.installSection`（上游在 0.1.2 迁移） |
+| `0.1.0-rc.6` … `0.1.1-rc.2` | 支持 | 使用顶层 `installSettingsSection`；`0.1.1-rc.2` 已实测 |
+| `>= 0.1.2`（含 `0.1.5-rc.2`） | 支持 | 使用 `ctx.settings.installSection`（上游在 0.1.2 迁移）；`0.1.5-rc.2` 已实测 |
 | `0.1.5-rc.2` | 已实测 | 0.4.0 发布时的上游基线 |
 
 上游从 `0.1.2` 起删除了 `installSettingsSection` / `settingsNamespace`，改为 settings 服务上的

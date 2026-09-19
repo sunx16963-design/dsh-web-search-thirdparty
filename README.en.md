@@ -8,14 +8,16 @@ so the model can both search and read.
 
 Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
+[![ci](https://github.com/sunx16963-design/dsh-web-search-thirdparty/actions/workflows/ci.yml/badge.svg)](https://github.com/sunx16963-design/dsh-web-search-thirdparty/actions/workflows/ci.yml)
+
 ## Version compatibility
 
 The plugin adapts to both generations of the DSH settings API at runtime — you do not choose:
 
 | DSH version | Status | Notes |
 | --- | --- | --- |
-| `0.1.0-rc.6` … `0.1.1-rc.2` | Supported | Uses the top-level `installSettingsSection` |
-| `>= 0.1.2` (incl. `0.1.5-rc.2`) | Supported | Uses `ctx.settings.installSection` (migrated upstream in 0.1.2) |
+| `0.1.0-rc.6` … `0.1.1-rc.2` | Supported | Uses the top-level `installSettingsSection`; `0.1.1-rc.2` verified |
+| `>= 0.1.2` (incl. `0.1.5-rc.2`) | Supported | Uses `ctx.settings.installSection` (migrated upstream in 0.1.2); `0.1.5-rc.2` verified |
 | `0.1.5-rc.2` | Verified | Upstream baseline when 0.4.0 was released |
 
 Upstream removed `installSettingsSection` / `settingsNamespace` in `0.1.2` and moved to the
