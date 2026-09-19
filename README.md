@@ -151,9 +151,33 @@ npm install
 npm run build:host     # 编译宿主插件（lib/index.js）
 npm run build:client   # 打包浏览器 UI（lib/client.js）
 npm run typecheck
+```sh
+npm install
+npm run build:host     # 编译宿主插件（lib/index.js）
+npm run build:client   # 打包浏览器 UI（lib/client.js）
+npm run typecheck
 npm test
 npm pack
 ```
+
+### 真实宿主自检（推荐，防上游断代）
+
+单元测试用的是仓库自写的平台垫片，**发现不了"上游删掉某个 API"这类断代**。这个脚本把构建产物装进
+真实的 cordis + `dsh-web` + `dsh-settings-file` 栈里跑一遍（apply 不抛错 / 设置分区注册 /
+`ctx.web.search` 归一化 / `ctx.web.fetch` 抓取）：
+
+```sh
+mkdir -p /tmp/dsh-e2e && cd /tmp/dsh-e2e
+npm init -y >/dev/null && npm pkg set type=module
+npm i --legacy-peer-deps @deepseek-ai/cordis@4 @deepseek-ai/dsh-web@0.1.5-rc.2 \
+  @deepseek-ai/dsh-settings@0.1.5-rc.2 @deepseek-ai/dsh-settings-file@0.1.5-rc.2 \
+  @deepseek-ai/dsh-credentials@0.1.5-rc.2 @deepseek-ai/dsh-launch-environment@0.1.5-rc.2 \
+  @deepseek-ai/dsh-llm@0.1.5-rc.2 @deepseek-ai/schemastery@3
+# peer 不随依赖安装：按报错把缺的 @deepseek-ai/* 再装一次
+node ./scripts/e2e-real-host.mjs /tmp/dsh-e2e
+```
+
+换 `0.1.1-rc.2` 之类的版本即可验证旧一代 settings API 路径（脚本会打印当前栈走的是哪一代）。
 
 源码按职责拆分（`src/index.ts` 只保留引擎实现、门面、抓取 provider、路由与 apply）：
 

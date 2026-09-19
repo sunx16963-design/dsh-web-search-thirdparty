@@ -158,9 +158,35 @@ npm install
 npm run build:host     # compiles the host plugin (lib/index.js)
 npm run build:client   # bundles the browser UI (lib/client.js)
 npm run typecheck
+```sh
+npm install
+npm run build:host     # compiles the host plugin (lib/index.js)
+npm run build:client   # bundles the browser UI (lib/client.js)
+npm run typecheck
 npm test
 npm pack
 ```
+
+### Real-host self-check (recommended; catches upstream drift)
+
+Unit tests use the repo's own platform shims, so they **cannot catch an upstream API removal**.
+This script loads the build into a real cordis + `dsh-web` + `dsh-settings-file` stack and asserts:
+apply does not throw, the settings namespace registers, `ctx.web.search()` normalizes, and
+`ctx.web.fetch()` retrieves:
+
+```sh
+mkdir -p /tmp/dsh-e2e && cd /tmp/dsh-e2e
+npm init -y >/dev/null && npm pkg set type=module
+npm i --legacy-peer-deps @deepseek-ai/cordis@4 @deepseek-ai/dsh-web@0.1.5-rc.2 \
+  @deepseek-ai/dsh-settings@0.1.5-rc.2 @deepseek-ai/dsh-settings-file@0.1.5-rc.2 \
+  @deepseek-ai/dsh-credentials@0.1.5-rc.2 @deepseek-ai/dsh-launch-environment@0.1.5-rc.2 \
+  @deepseek-ai/dsh-llm@0.1.5-rc.2 @deepseek-ai/schemastery@3
+# peers are not installed with dependencies: add whatever @deepseek-ai/* package it reports
+node ./scripts/e2e-real-host.mjs /tmp/dsh-e2e
+```
+
+Point it at `0.1.1-rc.2` and friends to exercise the legacy settings path (the script prints which
+generation the stack uses).
 
 Sources are split by responsibility (`src/index.ts` keeps engines, facade, fetch provider, routes, apply):
 
