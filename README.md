@@ -11,7 +11,7 @@
 
 ## 版本与兼容
 
-支持 DSH 最新版（`0.1.5-rc.2` 实测通过），并自动兼容旧版设置 API（`0.1.0-rc.6` 起）。
+支持 DSH 最新版，并自动兼容旧版设置 API（`0.1.0-rc.6` 起）。
 
 ## 系统要求
 
@@ -100,7 +100,7 @@ dshpm update dsh-web-search-thirdparty --profile web
 dshpm remove dsh-web-search-thirdparty --profile web
 ```
 
-### 安装时的两个注意点（实测）
+### 安装时的两个注意点
 
 **1）git / 本地源安装会被质量门暂停询问密钥 —— 直接留空跳过。**
 本插件安装与构建**不需要任何密钥**（密钥在设置页里填）。但管理器会扫描 README 里出现的

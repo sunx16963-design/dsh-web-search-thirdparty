@@ -12,7 +12,7 @@ Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 ## Version compatibility
 
-Supports the latest DSH (verified on `0.1.5-rc.2`), and stays compatible with the older settings API (from `0.1.0-rc.6`).
+Supports the latest DSH, and stays compatible with the older settings API (from `0.1.0-rc.6`).
 
 ## Requirements
 
@@ -104,7 +104,7 @@ dshpm update dsh-web-search-thirdparty --profile web
 dshpm remove dsh-web-search-thirdparty --profile web
 ```
 
-### Two install gotchas (measured)
+### Two install gotchas
 
 **1) git / local sources make the quality gate pause and ask for keys — just answer empty.**
 This plugin needs **no keys at install or build time** (keys are entered in the settings page). But the
