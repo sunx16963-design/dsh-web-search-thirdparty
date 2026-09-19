@@ -155,6 +155,16 @@ dsh-web-search-thirdparty:
   enableFetchProvider: true
 ```
 
+### 只在配置文件里生效的项
+
+设置页表单覆盖常用项（供应商、密钥/实例 URL、条数、合并、域名限额、相关度、缓存、以及各引擎的高级参数）。
+下面这些进阶项**没有**做进表单，只有写 `settings.yaml` / 配置层才生效（它们同样包含在"恢复默认"的清理清单里）：
+
+`timeoutMs`、`snippetMaxLength`、`retryCount`、`retryBackoffMs`、`extraHeadersJson`、
+`fallbackProviders`、`maxProviderQueries`、`maxProviderConcurrency`、
+`circuitEnabled`、`circuitFailureLimit`、`circuitCooldownMs`、`statsEnabled`、
+`fetchAllowPrivate`、`fetchMaxBodyChars`、`fetchTimeoutMs`、`fetchUserAgent`。
+
 ## 安全
 
 - `web_fetch` 默认拒绝私网 / 环回 / link-local / 云元数据（`169.254.169.254`）以及一批特殊段：

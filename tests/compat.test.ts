@@ -153,6 +153,21 @@ describe('cache', () => {
     expect(cacheKeyOf(base as any, 'q', 8)).not.toBe(cacheKeyOf({ ...base, extraHeadersJson: '{"X-Foo":"bar"}' } as any, 'q', 8))
   })
 
+  it('never shares mutable result objects with callers (cache pollution guard)', async () => {
+    resetRuntimeState()
+    let calls = 0
+    const sources = new Map<string, any>([['sev', mkAdapter('sev', async () => { calls++; return { sources: [{ url: 'https://p/1', title: 'orig' }] } })]])
+    const p = makeProvider({ sources, list: () => ['sev'] }, cfg({ provider: 'sev', cacheEnabled: true }))
+    const first = await p.search({ query: 'pollution', maxResults: 5 })
+    // 调用方原地改动返回值：不得影响缓存里的条目
+    first.sources[0].title = 'MUTATED'
+    first.sources.push({ url: 'https://evil/1' })
+    const second = await p.search({ query: 'pollution', maxResults: 5 })
+    expect(calls).toBe(1)
+    expect(second.sources).toHaveLength(1)
+    expect(second.sources[0].title).toBe('orig')
+  })
+
   it('counts hits and misses', async () => {
     resetRuntimeState()
     let calls = 0

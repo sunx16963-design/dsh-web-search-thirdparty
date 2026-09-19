@@ -161,6 +161,18 @@ dsh-web-search-thirdparty:
   enableFetchProvider: true
 ```
 
+### Config-file-only knobs
+
+The settings form covers the common options (provider, keys/instance URL, result count, merge, per-domain
+cap, relevance sort, cache, and each engine's advanced params). These advanced options are **not** in the
+form and only take effect from `settings.yaml` / the composition layer (they are also included in the
+"restore defaults" reset list):
+
+`timeoutMs`, `snippetMaxLength`, `retryCount`, `retryBackoffMs`, `extraHeadersJson`,
+`fallbackProviders`, `maxProviderQueries`, `maxProviderConcurrency`,
+`circuitEnabled`, `circuitFailureLimit`, `circuitCooldownMs`, `statsEnabled`,
+`fetchAllowPrivate`, `fetchMaxBodyChars`, `fetchTimeoutMs`, `fetchUserAgent`.
+
 ## Security
 
 - `web_fetch` refuses private / loopback / link-local / cloud-metadata (`169.254.169.254`) targets and

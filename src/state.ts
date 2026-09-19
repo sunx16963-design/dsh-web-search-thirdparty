@@ -55,18 +55,30 @@ function cacheSet(key: string, result: SearchResult, ttlMs: number): void {
 /** 近并发请求防击穿：同 key 进行中的请求共享一个 promise。 */
 const inflight = new Map<string, Promise<SearchResult>>()
 
+/**
+ * 缓存条目对外一律深拷贝一层：返回值可能与缓存共享引用，
+ * 调用方（seam / 工具层 / 第三方）一旦原地改动 sources，就会污染后续命中。
+ */
+function copyResult(result: SearchResult): SearchResult {
+  return {
+    ...result,
+    sources: result.sources.map((s) => ({ ...s })),
+    ...(result.truncated === undefined ? {} : { truncated: result.truncated }),
+  }
+}
+
 export async function cacheGetOrCompute(key: string, cfg: Config, compute: () => Promise<SearchResult>): Promise<SearchResult> {
   if (cfg.cacheEnabled) {
     const hit = cacheGet(key, cfg.cacheTtlMs)
-    if (hit !== undefined) { cacheCounters.hits += 1; return hit }
+    if (hit !== undefined) { cacheCounters.hits += 1; return copyResult(hit) }
     const running = inflight.get(key)
     if (running !== undefined) { cacheCounters.coalesced += 1; return running }
     cacheCounters.misses += 1
   }
   const task = (async () => {
     const result = await compute()
-    if (cfg.cacheEnabled) cacheSet(key, result, cfg.cacheTtlMs)
-    return result
+    if (cfg.cacheEnabled) cacheSet(key, copyResult(result), cfg.cacheTtlMs)
+    return copyResult(result)
   })()
   if (cfg.cacheEnabled) {
     inflight.set(key, task)
