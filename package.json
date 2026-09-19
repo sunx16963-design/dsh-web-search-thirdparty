@@ -1,7 +1,7 @@
 {
   "name": "dsh-web-search-thirdparty",
-  "version": "0.3.0",
-  "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE). Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
+  "version": "0.4.0",
+  "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE) and provides a web_fetch provider. Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -14,20 +14,40 @@
     "LICENSE"
   ],
   "license": "BSD-3-Clause",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "web-search",
+    "searxng",
+    "tavily",
+    "serper",
+    "brave",
+    "google-cse",
+    "web-fetch"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunx16963-design/dsh-web-search-thirdparty.git"
+  },
+  "homepage": "https://github.com/sunx16963-design/dsh-web-search-thirdparty#readme",
+  "bugs": {
+    "url": "https://github.com/sunx16963-design/dsh-web-search-thirdparty/issues"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-connection": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-launch-environment": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-web": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-launch-environment": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-web": ">=0.1.0-rc.6"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
@@ -61,9 +81,6 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings"
       ],

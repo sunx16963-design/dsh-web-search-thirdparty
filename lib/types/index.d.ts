@@ -8,10 +8,21 @@
  * or disabling the built-in `deepseek-official` provider (no WEB_PROVIDER_AMBIGUOUS).
  *
  * Result normalization mirrors the official seam: `{ sources: [{url,title?,snippet?,publishedAt?}], content?, truncated? }`.
+ *
+ * 模块划分：config（配置）/ engine-spec（引擎单表）/ text + html（纯函数）/
+ * net（SSRF 与重定向）/ state（缓存·熔断·统计）/ settings-compat（设置分区两代 API）。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { Service } from '@deepseek-ai/cordis';
 import type { EngineSpec } from './engine-spec.js';
+import { Config } from './config.js';
+import type { AppContext, Resolved, SearchProvider, SearchRequest, SearchResult, WebFetchProvider, WebFetchRequest, WebFetchResult } from './types.js';
+export { Config, DEFAULT_SEARXNG_BASE_URL } from './config.js';
+export { cleanSnippet, dedupe, dedupeByDomain, domainOf, normalizePublishedAt, queryTokens, sortByRelevance, toSource, } from './text.js';
+export { decodeEntities, htmlToMarkdown, stripInlineTags, NAMED_ENTITIES } from './html.js';
+export { assertPublicUrl, fetchManualRedirects, isPrivateIp, isPrivateName, MAX_REDIRECT_HOPS, stripHostBrackets } from './net.js';
+export { activeEndpointsOf, cacheKeyOf, getCacheStats, getCircuitStates, getSearchStats, resetCacheStats, resetRuntimeState, resetSearchStats, } from './state.js';
+export type { AppContext, Resolved, SearchRequest, SearchResult, SearchSource, WebFetchRequest, WebFetchResult } from './types.js';
 /** Stable provider id registered on `ctx.web` (must match cordis.patch.yml `web.searchProvider`). */
 export declare const PROVIDER_ID = "web-search-thirdparty";
 export declare const FETCH_PROVIDER_ID = "web-search-thirdparty-fetch";
@@ -20,132 +31,6 @@ export declare const PROVIDER_SERVICE_ID = "web-search-thirdparty";
 export declare const name = "web-search-thirdparty";
 /** 注册进哪个服务缝。 */
 export declare const inject: string[];
-export interface Config {
-    provider: string;
-    timeoutMs: number;
-    /** 单次请求最多返回的搜索结果条数。 */
-    maxResults: number;
-    /** 清洗后 snippet 的最大长度。 */
-    snippetMaxLength: number;
-    /** 是否合并多个可用源的结果（false=仅主源，失败自动降级到下一个可用源）。 */
-    mergeResults: boolean;
-    /** 附加降级源 id 列表（空=自动使用其它全部可用源）。 */
-    fallbackProviders: string[];
-    /** 合并/降级时最多查询的源数。 */
-    maxProviderQueries: number;
-    /** 每个域名最多保留的结果数（0=不限制）。 */
-    maxPerDomain: number;
-    /** 是否按查询词与标题/摘要的相关度排序。 */
-    relevanceSort: boolean;
-    /** 是否启用结果缓存（省 key 额度）。 */
-    cacheEnabled: boolean;
-    /** 缓存有效期（ms）。 */
-    cacheTtlMs: number;
-    /** 合并模式的最大并发 provider 数。 */
-    maxProviderConcurrency: number;
-    /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
-    circuitEnabled: boolean;
-    /** 连续失败多少次触发熔断。 */
-    circuitFailureLimit: number;
-    /** 熔断冷却时长（ms）。 */
-    circuitCooldownMs: number;
-    /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
-    fetchAllowPrivate: boolean;
-    /** 是否记录每源用量统计。 */
-    statsEnabled: boolean;
-    /** 抓取最大字符数。 */
-    fetchMaxBodyChars: number;
-    /** 抓取超时（ms）。 */
-    fetchTimeoutMs: number;
-    /** 抓取 User-Agent。 */
-    fetchUserAgent: string;
-    /** 网络层失败重试次数。 */
-    retryCount: number;
-    /** 重试指数退避基数（ms）。 */
-    retryBackoffMs: number;
-    /** 额外请求头（JSON 字符串，如 {"X-Foo":"bar"}），应用到所有源。 */
-    extraHeadersJson: string;
-    searxngBaseURL: string;
-    /** 各 keyed 引擎 endpoint（可自建/内网代理/镜像）。 */
-    tavilyEndpoint: string;
-    serperEndpoint: string;
-    braveEndpoint: string;
-    googleEndpoint: string;
-    searxngLanguage: string;
-    searxngCategories: string;
-    searxngSafesearch: number;
-    tavilyApiKey: string;
-    tavilyApiKeyEnv: string;
-    tavilySearchDepth: string;
-    serperApiKey: string;
-    serperApiKeyEnv: string;
-    serperLanguage: string;
-    braveApiKey: string;
-    braveApiKeyEnv: string;
-    braveCountry: string;
-    braveSearchLang: string;
-    bingApiKey: string;
-    bingApiKeyEnv: string;
-    bingEndpoint: string;
-    bingMarket: string;
-    googleApiKey: string;
-    googleApiKeyEnv: string;
-    googleSearchEngineId: string;
-    googleSearchEngineIdEnv: string;
-    googleLanguage: string;
-}
-export declare const Config: any;
-interface SearchSource {
-    url: string;
-    title?: string;
-    snippet?: string;
-    publishedAt?: string;
-}
-interface SearchResult {
-    sources: SearchSource[];
-    content?: string;
-    truncated?: boolean;
-}
-interface SearchRequest {
-    query: string;
-    maxResults?: number;
-}
-interface SearchProvider {
-    id: string;
-    available(): boolean;
-    search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
-}
-interface WebFetchRequest {
-    url: string;
-}
-interface WebFetchBody {
-    kind: 'text' | 'html';
-    content: string;
-}
-interface WebFetchResult {
-    url: string;
-    statusCode: number;
-    body: WebFetchBody;
-    truncated: boolean;
-}
-interface WebFetchProvider {
-    id: string;
-    available(): boolean;
-    fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>;
-}
-type AppContext = Context & {
-    web: {
-        registerSearchProvider(provider: SearchProvider): () => void;
-        registerFetchProvider(provider: WebFetchProvider): () => void;
-    };
-};
-/** 每个引擎一次操作所需的已解析配置快照。 */
-interface Resolved {
-    ctx: AppContext;
-    cfg: Config;
-}
-/** 归一化时间戳：可解析的转 ISO；解析不了的（如 Brave 的 “2 hours ago”、Serper 的相对日期）直接丢弃。 */
-export declare function normalizePublishedAt(value: unknown): string | undefined;
 export declare function searchSearxng(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchTavily(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 export declare function searchSerper(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
@@ -154,28 +39,6 @@ export declare function searchBing(r: Resolved, req: SearchRequest, signal?: Abo
 export declare function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 /** 内置引擎实现表（id 与 ENGINE_SPECS 一一对应；完整性由 tests/engine-spec.test.ts 校验）。 */
 export declare const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: AbortSignal) => Promise<SearchResult>>;
-/** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
-export declare function cleanSnippet(text: string | undefined, max: number): string | undefined;
-/** 取 URL 的根域名（去 www.）。 */
-export declare function domainOf(url: string): string;
-/** 每个域名最多保留 limit 条（0=不限制）。 */
-export declare function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[];
-export declare function queryTokens(query: string): string[];
-/** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
-export declare function sortByRelevance(sources: SearchSource[], query: string): SearchSource[];
-export declare function cacheKeyOf(cfg: Config, query: string, maxResults: number): string;
-/** 对外只读的熔断状态（设置页统计面板用）。 */
-export declare function getCircuitStates(): Record<string, {
-    open: boolean;
-    failures: number;
-}>;
-export declare function getSearchStats(): Record<string, {
-    requests: number;
-    errors: number;
-    avgLatencyMs: number;
-    lastError?: string;
-}>;
-export declare function resetSearchStats(): void;
 /** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
  *  由 ENGINE_SPECS 的凭据输入行驱动（不带凭据的引擎如 searxng 恒可用）；
  *  未知的自定义源 id 默认视为可用。 */
@@ -214,7 +77,7 @@ export interface SearchSourceAdapter {
 export declare class ProviderRegistry extends Service {
     readonly sources: Map<string, SearchSourceAdapter>;
     constructor(ctx: Context);
-    register(adapter: SearchSourceAdapter): () => void;
+    register(adapter: SearchSourceAdapter, internal?: boolean): () => void;
     list(): string[];
 }
 /** 把内置引擎包装成统一 adapter（内部用；可用性由 buildProviderChain 走 credentials-aware 探测）。 */
@@ -223,22 +86,24 @@ export declare function builtinAdapter(ctx: AppContext, spec: EngineSpec): Searc
  *  内置源的可用性与真实搜索走同一套凭据解析（credentials 服务里的 key 也算已配置）；
  *  ctx 省略时退化为 adapter.available / 默认可用。 */
 export declare function buildProviderChain(cfg: Config, registry: ProviderRegistry, ctx?: AppContext): Promise<string[]>;
+/**
+ * 同步可判定性：字面量 → 启动环境变量。credentials 服务里的 key 只能异步解析，
+ * 同步没看到时保持乐观（true），由 refreshAvailability() 的探测结果修正。
+ */
+export declare function syncKeyAvailable(ctx: AppContext, cfg: Config, id: string): boolean;
 export declare class ThirdPartySearchProvider implements SearchProvider {
     private readonly resolveOptions;
     readonly id = "web-search-thirdparty";
+    /** 异步探测得到的每源可用性（apply 时与每次配置变更后刷新）。 */
+    private readonly probed;
     constructor(resolveOptions: () => Resolved);
+    /** 用与真实搜索同一套凭据解析链刷新各内置源的可用性（供 available() 同步读取）。 */
+    refreshAvailability(): Promise<void>;
     available(): boolean;
     search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>;
 }
 /** 用当前配置 + 表单传入值，组装一次测试搜索用 config（取值映射由 ENGINE_SPECS 驱动）。 */
 export declare function cfgFromTestBody(cfg: Config, body: any): Config;
-export declare function isPrivateIp(addr: string): boolean;
-export declare function isPrivateName(host: string): boolean;
-export declare function assertPublicUrl(url: URL, cfg: Config): Promise<void>;
-/** 通用 HTML 实体解码：命名 + &#123; 十进制 + &#x1F; 十六进制；未知实体原样保留。 */
-export declare function decodeEntities(input: string): string;
-/** 极简 HTML→Markdown 清洗：去 script/style、块级换行、标题/链接/图片转 Markdown、解码实体、折叠空白。 */
-export declare function htmlToMarkdown(html: string): string;
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */
 export declare class LocalFetchProvider implements WebFetchProvider {
     private readonly resolveOptions;
@@ -248,4 +113,3 @@ export declare class LocalFetchProvider implements WebFetchProvider {
     fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>;
 }
 export declare function apply(ctx: AppContext, config: Config): void;
-export {};

@@ -10,7 +10,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # tsdown（构建浏览器侧 bundle）需要 Node ^22.18 || >=24.11 的原生配置加载器；
+          # 用 Node 20 会回退到可选 peer `unrun` 并失败。
+          node-version: '24'
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build

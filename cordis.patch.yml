@@ -1,14 +1,19 @@
 # dsh-web-search-thirdparty — bundle patch layer
 #
-# Installed as a bundle, this plugin replaces the built-in DeepSeek-only web
-# search with configurable third-party search engines, and adds a web_fetch
-# (page retrieval) provider so the model can read full pages of a result.
+# Installed as a bundle, this plugin:
+#   1. inserts its own host row (search facade + optional fetch provider);
+#   2. points `web.searchProvider` at the facade (replaces deepseek-official
+#      without touching/disabling the built-in plugin → no WEB_PROVIDER_AMBIGUOUS)
+#      and `web.fetchProvider` at this plugin's retrieval provider;
+#   3. enables both official web tools: `web_search` and `web_fetch`.
 #
-# 1. Insert this plugin's own host row (provider facade + fetch provider).
-# 2. Point `web.searchProvider` at our facade (replaces deepseek-official
-#    without touching/disabling the built-in plugin), and `web.fetchProvider`
-#    at our retrieval provider.
-# 3. Enable both official web tools: `web_search` and `web_fetch`.
+# NOTE ON FETCH: upstream ships `tool-web.fetch: false` with no fetch provider
+# mounted, on the grounds that SSRF protection is the fetch provider's job and the
+# model picks the request target. This plugin deliberately deviates: it mounts its
+# own provider (SSRF-guarded: private/loopback/link-local/metadata/special-purpose
+# ranges are refused, every redirect hop is re-checked) and enables `web_fetch`.
+# To keep upstream's posture instead, set `enableFetchProvider: false` in settings
+# and delete the `fetchProvider` line below.
 - insert:
     - id: web-search-thirdparty
       name: 'dsh-web-search-thirdparty'

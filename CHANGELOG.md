@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.4.0] - 2026-09-19
+
+支持最新 DSH（0.1.5-rc.2）并修复一批长期问题。
+
+### Compatibility（重要）
+- **支持 DSH ≥ 0.1.2 的设置 API 变更**：上游在 0.1.2 之后删除了顶层 `installSettingsSection` /
+  `settingsNamespace`，改为 `ctx.settings.installSection(...)` + 字面量 namespace。插件现在运行时探测
+  两代 API（旧 helper → 新服务方法 → 结构性兜底），并在都没有时退化为“仅用组合配置”。
+  此前在新版 DSH 上 `apply()` 会因调用已删除的函数而抛错、插件加载失败。
+- `src/shims.d.ts` 不再把已删除的符号声明为存在（这正是此前“typecheck 通过但运行期炸掉”的原因）。
+- 移除已停止发布的 `@deepseek-ai/dsh-client-runtime` peer（上游 0.1.2 起被
+  `dsh-client-ui-cordis` / `dsh-cordis-client-runner` 取代），并清理 `dsh.client.inject`
+  中未使用的 connection / locale。
+- peerDependencies 区间由 `^0.1.0-rc.6`（实测不匹配 0.1.1-rc.2 / 0.1.5-rc.2 等预发布版本）
+  放宽为 `>=0.1.0-rc.6`；`engines.node` 声明为 `>=22.19`。
+
+### Fixed
+- **CI 修复**：`npm run build` 在 Node 20 上必失败 —— tsdown 0.22 的配置加载器在缺少原生 TS 支持时
+  回退到可选 peer `unrun`（未安装）。CI 改为 Node 24（与 tsdown engines `^22.18 || >=24.11` 对齐）。
+- `truncated` 诚实上报：门面按 `maxResults` 截断过结果时不再恒返回 `false`（seam 会原样透传该字段）。
+- Brave `publishedAt` 归一化：`page_age` 不再未经校验直接透传，改为与其它引擎一致走
+  `normalizePublishedAt()`（解析不了的相对时间/异常值按契约丢弃）。
+- 响应体非合法 JSON 不再参与重试（它不是瞬态故障，重试只会浪费配额），直接报可诊断错误。
+- 缓存 key 并入 `extraHeadersJson`（自定义请求头会改变上游结果，此前会命中旧缓存）。
+
+### Changed
+- `available()` 语义对齐 seam：新增同步确定性判断（字面量 → 启动环境）+ 异步探测缓存
+  （`refreshAvailability()`，配置变更后自动刷新）。凭据只存在于 credentials 服务时仍保持乐观，
+  不会把可用源误判为不可用。
+- 缓存加上限（300 条，TTL 之外按写入时间淘汰）并统计命中/未命中/合并数（`GET /api/web-search-thirdparty/stats`
+  返回 `cache` 字段，设置页用量面板显示）。
+- `ProviderRegistry.register()` 保护内置引擎 id：第三方源不得静默覆盖内置实现（新增 internal 标记）。
+- 插件卸载 / 热重载时清空缓存、熔断与统计（`resetRuntimeState()`），避免旧一代状态残留。
+- 新增配置 `enableFetchProvider`（默认 true）：关掉可把 `web_fetch` 交回宿主的官方 provider
+  （上游默认 `fetch: false` 且不挂 fetch provider，本插件属主动偏离，补丁注释已写明）。
+- SSRF 防护补强：新增 IPv6 `2002::/16`(6to4)、`2001::/32`(Teredo)、`ff00::/8`(组播)、
+  `2001:db8::/32`(文档段)、`64:ff9b::/96`(NAT64)，以及 IPv4 `192.0.0.0/24`、`198.18.0.0/15`、
+  `192.88.99.0/24`、`240.0.0.0/4`。README 明确记录 DNS 重解析（rebinding）窗口这一残留风险。
+- 测试连接路由改用 `min(3, maxResults)` 探测（此前恒为 1，无法覆盖引擎的条数参数路径）。
+- 源码按职责拆分为 `config` / `types` / `text` / `html` / `net` / `state` / `settings-compat`，
+  `src/index.ts` 从 1387 行降到约 800 行；对外导出面保持不变（测试与第三方引用不受影响）。
+- 测试从 54 增至 69（新增两代 settings API、可用性探测、truncated、缓存 key/计数、
+  SSRF 特殊段、非 JSON 不重试等回归用例）。
+
 ## [0.3.0] - 2026-08-23
 
 可维护性与 DX：引擎描述收敛为单表驱动，用量统计闭环。
@@ -17,7 +61,7 @@
 - “恢复默认”字段清单改由 spec 派生，并补齐此前遗漏的 endpoint / 重试 / 自定义头等全局项；修复 bingEndpoint 在列表里而其它引擎 endpoint 不在的不一致
 - 设置页保存后非敏感输入（SearXNG 实例 URL）正确回填；client `inject` 清理未使用的 locale/connection/remote
 
-## [0.2.0] - 2026-08-23
+## [0.2.0] - 2026-08-23（未发布到 npm：npm 上只有 0.1.0 / 0.1.1 / 0.3.0 / 0.4.0）
 
 安全与正确性修复为主，含少量行为调整。
 

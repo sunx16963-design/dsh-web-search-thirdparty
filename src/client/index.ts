@@ -24,7 +24,7 @@ const GLOBAL_RESET_FIELDS = [
   'mergeResults', 'fallbackProviders', 'maxProviderQueries',
   'maxPerDomain', 'relevanceSort', 'cacheEnabled', 'cacheTtlMs',
   'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs',
-  'fetchAllowPrivate', 'statsEnabled', 'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
+  'enableFetchProvider', 'fetchAllowPrivate', 'statsEnabled', 'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
   'retryCount', 'retryBackoffMs', 'extraHeadersJson',
 ]
 
@@ -45,6 +45,7 @@ export const inject = ['slots', 'settingsScope']
 
 interface SettingsShape {
   provider?: string
+  enableFetchProvider?: boolean
   searxngBaseURL?: string
   maxResults?: number
   tavilyApiKey?: string
@@ -190,7 +191,11 @@ function mountForm(container: HTMLElement, scope: any): () => void {
         return
       }
       const circuits = (json?.circuit ?? {}) as Record<string, { open?: boolean }>
+      const cache = (json?.cache ?? {}) as { hits?: number; misses?: number; coalesced?: number }
       statBody.textContent = ''
+      const cacheLine = document.createElement('div')
+      cacheLine.textContent = '缓存：命中 ' + (cache.hits ?? 0) + ' · 未命中 ' + (cache.misses ?? 0) + ' · 合并 ' + (cache.coalesced ?? 0)
+      statBody.appendChild(cacheLine)
       for (const [id, st] of entries) {
         const line = document.createElement('div')
         let text = id + ' · ' + st.requests + ' 次 · 错误 ' + st.errors + ' · 均 ' + st.avgLatencyMs + 'ms'
@@ -209,6 +214,15 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   statDetails.appendChild(statBody)
   statDetails.appendChild(statRefresh)
   root.appendChild(statDetails)
+
+  const fetchProviderRow = row()
+  const fetchProviderCheck = document.createElement('input'); fetchProviderCheck.type = 'checkbox'
+  fetchProviderCheck.style.cssText = 'width:16px;height:16px;accent-color:currentcolor'
+  const fetchProviderText = document.createElement('span'); fetchProviderText.textContent = '注册自带 web_fetch 抓取 provider（关掉则交回宿主）'
+  fetchProviderText.style.cssText = 'font-size:13px'
+  fetchProviderRow.style.cssText = 'flex-direction:row;align-items:center;gap:8px'
+  fetchProviderRow.appendChild(fetchProviderCheck); fetchProviderRow.appendChild(fetchProviderText)
+  enhBody.appendChild(fetchProviderRow)
 
   const perDomainRow = row()
   const perDomainInput = input('number')
@@ -317,6 +331,7 @@ function mountForm(container: HTMLElement, scope: any): () => void {
     mergeCheck.checked = v.mergeResults === true
     refreshSecretPlaceholder(provider)
     renderAdv(provider)
+    fetchProviderCheck.checked = v.enableFetchProvider !== false
     perDomainInput.value = String(v.maxPerDomain ?? 2)
     relevanceCheck.checked = v.relevanceSort === true
     cacheCheck.checked = v.cacheEnabled !== false
@@ -375,6 +390,7 @@ function mountForm(container: HTMLElement, scope: any): () => void {
       if (raw === '') continue
       writes.push(scope.set(a.key, a.numeric ? Number(raw) : raw))
     }
+    writes.push(scope.set('enableFetchProvider', fetchProviderCheck.checked))
     writes.push(scope.set('maxPerDomain', clampInt(Number(perDomainInput.value))))
     writes.push(scope.set('relevanceSort', relevanceCheck.checked))
     writes.push(scope.set('cacheEnabled', cacheCheck.checked))
@@ -399,7 +415,8 @@ function mountForm(container: HTMLElement, scope: any): () => void {
       mergeCheck.checked = false
       refreshSecretPlaceholder('searxng')
       renderAdv('searxng')
-      perDomainInput.value = '2'
+      fetchProviderCheck.checked = true
+    perDomainInput.value = '2'
       relevanceCheck.checked = false
       cacheCheck.checked = true
       cacheSecInput.value = '60'

@@ -8,17 +8,43 @@
  * or disabling the built-in `deepseek-official` provider (no WEB_PROVIDER_AMBIGUOUS).
  *
  * Result normalization mirrors the official seam: `{ sources: [{url,title?,snippet?,publishedAt?}], content?, truncated? }`.
+ *
+ * 模块划分：config（配置）/ engine-spec（引擎单表）/ text + html（纯函数）/
+ * net（SSRF 与重定向）/ state（缓存·熔断·统计）/ settings-compat（设置分区两代 API）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import { lookup as dnsLookup } from 'node:dns/promises'
 import { ENGINE_SPECS, getEngineSpec, engineInputs } from './engine-spec.js'
 import type { EngineSpec } from './engine-spec.js'
+import { Config, DEFAULT_SEARXNG_BASE_URL } from './config.js'
+import type { AppContext, KeySpec, Resolved, SearchProvider, SearchRequest, SearchResult, SearchSource, WebFetchProvider, WebFetchRequest, WebFetchResult } from './types.js'
+import { cleanSnippet, dedupe, dedupeByDomain, normalizePublishedAt, sortByRelevance, toSource } from './text.js'
+import { htmlToMarkdown } from './html.js'
+import { assertPublicUrl, fetchManualRedirects } from './net.js'
+import {
+  cacheGetOrCompute, cacheKeyOf, circuitMarkFailure, circuitMarkSuccess, circuitOpen,
+  getCacheStats, getCircuitStates, getSearchStats, recordStat, resetRuntimeState, resetSearchStats,
+  runWithConcurrency,
+} from './state.js'
+import { installSettingsSectionCompat } from './settings-compat.js'
+
+// 对外重导出：保持历史导出面（第三方按需引用 / 测试引用），实现已迁到独立模块。
+export { Config, DEFAULT_SEARXNG_BASE_URL } from './config.js'
+export {
+  cleanSnippet, dedupe, dedupeByDomain, domainOf, normalizePublishedAt, queryTokens,
+  sortByRelevance, toSource,
+} from './text.js'
+export { decodeEntities, htmlToMarkdown, stripInlineTags, NAMED_ENTITIES } from './html.js'
+export { assertPublicUrl, fetchManualRedirects, isPrivateIp, isPrivateName, MAX_REDIRECT_HOPS, stripHostBrackets } from './net.js'
+export {
+  activeEndpointsOf, cacheKeyOf, getCacheStats, getCircuitStates, getSearchStats,
+  resetCacheStats, resetRuntimeState, resetSearchStats,
+} from './state.js'
+export type { AppContext, Resolved, SearchRequest, SearchResult, SearchSource, WebFetchRequest, WebFetchResult } from './types.js'
 
 /** Stable provider id registered on `ctx.web` (must match cordis.patch.yml `web.searchProvider`). */
 export const PROVIDER_ID = 'web-search-thirdparty'
@@ -30,245 +56,11 @@ export const name = 'web-search-thirdparty'
 export const inject = ['web']
 
 /** Settings 分区名（在 DSH 设置页自动渲染一节 UI）。 */
-const SETTINGS_NAMESPACE = settingsNamespace('dsh-web-search-thirdparty')
-
-/** 默认 SearXNG 公共实例 —— 无任何 key 也能开箱即用。 */
-const DEFAULT_SEARXNG_BASE_URL = 'https://searx.be'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Config / settings schema
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface Config {
-  provider: string
-  timeoutMs: number
-  /** 单次请求最多返回的搜索结果条数。 */
-  maxResults: number
-  /** 清洗后 snippet 的最大长度。 */
-  snippetMaxLength: number
-  /** 是否合并多个可用源的结果（false=仅主源，失败自动降级到下一个可用源）。 */
-  mergeResults: boolean
-  /** 附加降级源 id 列表（空=自动使用其它全部可用源）。 */
-  fallbackProviders: string[]
-  /** 合并/降级时最多查询的源数。 */
-  maxProviderQueries: number
-  /** 每个域名最多保留的结果数（0=不限制）。 */
-  maxPerDomain: number
-  /** 是否按查询词与标题/摘要的相关度排序。 */
-  relevanceSort: boolean
-  /** 是否启用结果缓存（省 key 额度）。 */
-  cacheEnabled: boolean
-  /** 缓存有效期（ms）。 */
-  cacheTtlMs: number
-  /** 合并模式的最大并发 provider 数。 */
-  maxProviderConcurrency: number
-  /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
-  circuitEnabled: boolean
-  /** 连续失败多少次触发熔断。 */
-  circuitFailureLimit: number
-  /** 熔断冷却时长（ms）。 */
-  circuitCooldownMs: number
-  /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
-  fetchAllowPrivate: boolean
-  /** 是否记录每源用量统计。 */
-  statsEnabled: boolean
-  /** 抓取最大字符数。 */
-  fetchMaxBodyChars: number
-  /** 抓取超时（ms）。 */
-  fetchTimeoutMs: number
-  /** 抓取 User-Agent。 */
-  fetchUserAgent: string
-  /** 网络层失败重试次数。 */
-  retryCount: number
-  /** 重试指数退避基数（ms）。 */
-  retryBackoffMs: number
-  /** 额外请求头（JSON 字符串，如 {"X-Foo":"bar"}），应用到所有源。 */
-  extraHeadersJson: string
-  searxngBaseURL: string
-  /** 各 keyed 引擎 endpoint（可自建/内网代理/镜像）。 */
-  tavilyEndpoint: string
-  serperEndpoint: string
-  braveEndpoint: string
-  googleEndpoint: string
-  searxngLanguage: string
-  searxngCategories: string
-  searxngSafesearch: number
-  tavilyApiKey: string
-  tavilyApiKeyEnv: string
-  tavilySearchDepth: string
-  serperApiKey: string
-  serperApiKeyEnv: string
-  serperLanguage: string
-  braveApiKey: string
-  braveApiKeyEnv: string
-  braveCountry: string
-  braveSearchLang: string
-  bingApiKey: string
-  bingApiKeyEnv: string
-  bingEndpoint: string
-  bingMarket: string
-  googleApiKey: string
-  googleApiKeyEnv: string
-  googleSearchEngineId: string
-  googleSearchEngineIdEnv: string
-  googleLanguage: string
-}
-
-export const Config = z.object({
-  /** 当前路由到的第三方引擎 id：searxng | tavily | serper | brave | bing | google-cse */
-  provider: z.string().default('searxng'),
-  /** 单次搜索超时（ms）。 */
-  timeoutMs: z.number().step(100).min(1000).max(120000).default(30000),
-  /** 单次请求最多返回的搜索结果条数。 */
-  maxResults: z.number().step(1).min(1).max(20).default(8),
-  /** 清洗后 snippet 的最大长度。 */
-  snippetMaxLength: z.number().step(10).min(40).max(2000).default(260),
-  /** 是否合并多个可用源的结果。 */
-  mergeResults: z.boolean().default(false),
-  /** 附加降级源 id 列表（空=自动使用其它全部可用源）。 */
-  fallbackProviders: z.array(z.string()).default([]),
-  /** 合并/降级模式下单次搜索最多查询的源数（含主源，两种模式都生效）。 */
-  maxProviderQueries: z.number().step(1).min(1).max(6).default(2),
-  /** 每个域名最多保留的结果数（0=不限制）。 */
-  maxPerDomain: z.number().step(1).min(0).max(20).default(2),
-  /** 是否按查询词与标题/摘要的相关度排序。 */
-  relevanceSort: z.boolean().default(false),
-  /** 是否启用结果缓存（省 key 额度）。 */
-  cacheEnabled: z.boolean().default(true),
-  /** 缓存有效期（ms）。 */
-  cacheTtlMs: z.number().step(1000).min(1000).max(86400000).default(60000),
-  /** 合并模式的最大并发 provider 数。 */
-  maxProviderConcurrency: z.number().step(1).min(1).max(6).default(3),
-  /** 是否启用每源熔断（连续失败进入冷却，降级时跳过）。 */
-  circuitEnabled: z.boolean().default(true),
-  /** 连续失败多少次触发熔断。 */
-  circuitFailureLimit: z.number().step(1).min(1).max(20).default(3),
-  /** 熔断冷却时长（ms）。 */
-  circuitCooldownMs: z.number().step(1000).min(1000).max(600000).default(15000),
-  /** web_fetch 是否允许抓取私网/环回地址（默认 false=拦截，防 SSRF）。 */
-  fetchAllowPrivate: z.boolean().default(false),
-  /** 是否记录每源用量统计。 */
-  statsEnabled: z.boolean().default(true),
-  /** 抓取最大字符数。 */
-  fetchMaxBodyChars: z.number().step(500).min(500).max(500000).default(60000),
-  /** 抓取超时（ms）。 */
-  fetchTimeoutMs: z.number().step(1000).min(1000).max(120000).default(15000),
-  /** 抓取 User-Agent。 */
-  fetchUserAgent: z.string().default('deepseek-harness-web-search-thirdparty/0.3.0'),
-  /** 网络层失败重试次数。 */
-  retryCount: z.number().step(1).min(0).max(5).default(1),
-  /** 重试指数退避基数（ms）。 */
-  retryBackoffMs: z.number().step(50).min(0).max(10000).default(250),
-  /** 额外请求头（JSON 字符串，如 {"X-Foo":"bar"}）。 */
-  extraHeadersJson: z.string().default(''),
-  /** 各 keyed 引擎 endpoint（可自建/内网代理/镜像）。 */
-  tavilyEndpoint: z.string().default('https://api.tavily.com/search'),
-  serperEndpoint: z.string().default('https://google.serper.dev/search'),
-  braveEndpoint: z.string().default('https://api.search.brave.com/res/v1/web/search'),
-  googleEndpoint: z.string().default('https://www.googleapis.com/customsearch/v1'),
-  // ── SearXNG（无 key，默认）──
-  searxngBaseURL: z.string().default(DEFAULT_SEARXNG_BASE_URL),
-  searxngLanguage: z.string().default(''),
-  searxngCategories: z.string().default('general'),
-  searxngSafesearch: z.number().min(0).max(2).default(0),
-  // ── Tavily ──
-  tavilyApiKey: z.string().role('secret').default(''),
-  tavilyApiKeyEnv: z.string().role('credential-ref').default('TAVILY_API_KEY'),
-  tavilySearchDepth: z.string().default('basic'),
-  // ── Serper（Google SERP）──
-  serperApiKey: z.string().role('secret').default(''),
-  serperApiKeyEnv: z.string().role('credential-ref').default('SERPER_API_KEY'),
-  serperLanguage: z.string().default(''),
-  // ── Brave Search ──
-  braveApiKey: z.string().role('secret').default(''),
-  braveApiKeyEnv: z.string().role('credential-ref').default('BRAVE_API_KEY'),
-  braveCountry: z.string().default(''),
-  braveSearchLang: z.string().default(''),
-  // ── Bing Web Search ──
-  bingApiKey: z.string().role('secret').default(''),
-  bingApiKeyEnv: z.string().role('credential-ref').default('BING_SEARCH_API_KEY'),
-  bingEndpoint: z.string().default('https://api.bing.microsoft.com/v7.0/search'),
-  bingMarket: z.string().default('en-US'),
-  // ── Google Custom Search ──
-  googleApiKey: z.string().role('secret').default(''),
-  googleApiKeyEnv: z.string().role('credential-ref').default('GOOGLE_CSE_API_KEY'),
-  googleSearchEngineId: z.string().default(''),
-  googleSearchEngineIdEnv: z.string().role('credential-ref').default('GOOGLE_CSE_ID'),
-  googleLanguage: z.string().default(''),
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 归一化类型（对齐官方 ctx.web search seam）
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface SearchSource {
-  url: string
-  title?: string
-  snippet?: string
-  publishedAt?: string
-}
-
-interface SearchResult {
-  sources: SearchSource[]
-  content?: string
-  truncated?: boolean
-}
-
-interface SearchRequest {
-  query: string
-  maxResults?: number
-}
-
-interface SearchProvider {
-  id: string
-  available(): boolean
-  search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult>
-}
-
-interface WebFetchRequest {
-  url: string
-}
-
-interface WebFetchBody {
-  kind: 'text' | 'html'
-  content: string
-}
-
-interface WebFetchResult {
-  url: string
-  statusCode: number
-  body: WebFetchBody
-  truncated: boolean
-}
-
-interface WebFetchProvider {
-  id: string
-  available(): boolean
-  fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>
-}
-
-type AppContext = Context & {
-  web: {
-    registerSearchProvider(provider: SearchProvider): () => void
-    registerFetchProvider(provider: WebFetchProvider): () => void
-  }
-}
-
-/** 每个引擎一次操作所需的已解析配置快照。 */
-interface Resolved {
-  ctx: AppContext
-  cfg: Config
-}
+const SETTINGS_NAMESPACE = 'dsh-web-search-thirdparty'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 凭据解析：字面量 → credentials 服务 → 启动环境变量（对齐官方 web-search-deepseek）
 // ─────────────────────────────────────────────────────────────────────────────
-
-interface KeySpec {
-  literal: string | undefined
-  envRef: string
-  envVar: string
-}
 
 async function resolveApiKey(ctx: AppContext, spec: KeySpec): Promise<string | undefined> {
   const literal = spec.literal ?? ''
@@ -317,7 +109,6 @@ function requireKey(providerLabel: string, value: string | undefined, what = 'AP
   }
   return value
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP 小工具 + 错误归一化（WEB_PROVIDER_ERROR / WEB_ABORTED）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -383,7 +174,12 @@ async function fetchJson(providerLabel: string, r: Resolved, url: string, init: 
         try { await res.arrayBuffer() } catch { /* 连接释放失败不阻塞重试 */ }
         continue
       }
-      return await res.json() as any
+      try {
+        return await res.json() as any
+      } catch (parseError) {
+        // 非 JSON 响应不是瞬态故障：重试只会浪费配额，直接给出可诊断的错误
+        throw new WebError(`${providerLabel} error: 响应不是合法 JSON (HTTP ${res.status})`, 'WEB_PROVIDER_ERROR', { cause: parseError })
+      }
     } catch (error) {
       if (signal?.aborted === true || (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')) {
         throw new WebError(`${providerLabel} search aborted`, 'WEB_ABORTED', { cause: error })
@@ -408,46 +204,6 @@ function asHeaders(h: any): Record<string, string> {
   }
   return h as Record<string, string>
 }
-
-/** 按 url 去重，丢掉空 url。 */
-function dedupe(sources: SearchSource[]): SearchSource[] {
-  const seen = new Set<string>()
-  const out: SearchSource[] = []
-  for (const s of sources) {
-    if (!s.url || s.url.length === 0) continue
-    if (seen.has(s.url)) continue
-    seen.add(s.url)
-    out.push(s)
-  }
-  return out
-}
-
-/** 归一化时间戳：可解析的转 ISO；解析不了的（如 Brave 的 “2 hours ago”、Serper 的相对日期）直接丢弃。 */
-export function normalizePublishedAt(value: unknown): string | undefined {
-  if (value == null) return undefined
-  const s = String(value).trim()
-  if (s.length === 0) return undefined
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    const d = new Date(s.length >= 13 ? n : n * 1000) // 秒/毫秒时间戳自适应
-    return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
-  }
-  const t = Date.parse(s)
-  return Number.isNaN(t) ? undefined : new Date(t).toISOString()
-}
-
-/** 引擎原始字段 → 归一化 SearchSource（空值字段一律省略）。 */
-function toSource(url: unknown, title: unknown, snippet: unknown, published: unknown): SearchSource {
-  const out: SearchSource = { url: String(url ?? '').trim() }
-  const t = String(title ?? '')
-  if (t.length > 0) out.title = t
-  const sn = String(snippet ?? '')
-  if (sn.length > 0) out.snippet = sn
-  const pub = normalizePublishedAt(published)
-  if (pub !== undefined) out.publishedAt = pub
-  return out
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 六个引擎实现
 // ─────────────────────────────────────────────────────────────────────────────
@@ -537,12 +293,10 @@ export async function searchBrave(r: Resolved, req: SearchRequest, signal?: Abor
   }, signal)
   const raw = Array.isArray(data?.web?.results) ? data.web.results : []
   return {
-    sources: dedupe(raw.map((item: any): SearchSource => ({
-      url: String(item?.url ?? '').trim(),
-      ...(item?.title != null && String(item.title).length > 0 ? { title: String(item.title) } : {}),
-      ...(item?.description != null && String(item.description).length > 0 ? { snippet: String(item.description) } : {}),
-      ...(item?.page_age != null && String(item.page_age).length > 0 ? { publishedAt: String(item.page_age) } : {}),
-    }))),
+    // page_age 通常已是 ISO，但仍走 normalizePublishedAt 统一校验：
+    // 解析不了的值（相对时间/异常格式）按契约丢弃，而不是把非 ISO 值透传给 seam。
+    sources: dedupe(raw.map((item: any): SearchSource =>
+      toSource(item?.url, item?.title, item?.description, item?.page_age))),
   }
 }
 
@@ -588,7 +342,6 @@ export async function searchGoogleCse(r: Resolved, req: SearchRequest, signal?: 
     })),
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 门面 provider：available() + 内部路由
 // ─────────────────────────────────────────────────────────────────────────────
@@ -602,207 +355,6 @@ export const ENGINES: Record<string, (r: Resolved, req: SearchRequest, signal?: 
   bing: searchBing,
   'google-cse': searchGoogleCse,
 }
-
-/** 清洗并截断 snippet：去 HTML 标签、解码实体、折叠空白、限制长度。 */
-export function cleanSnippet(text: string | undefined, max: number): string | undefined {
-  if (text === undefined) return undefined
-  let sn = String(text)
-  sn = sn.replace(/<[^>]+>/g, ' ')
-  sn = decodeEntities(sn)
-  sn = sn.replace(/[\t\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
-  sn = sn.split(' | ').join(' ')
-  sn = sn.replace(/(\s*[-=_]{2,}\s*)+/g, ' ').replace(/\s{2,}/g, ' ').trim()
-  if (sn.length > max) sn = sn.slice(0, max - 1).trimEnd() + '…'
-  return sn.length > 0 ? sn : undefined
-}
-
-/** 取 URL 的根域名（去 www.）。 */
-export function domainOf(url: string): string {
-  try {
-    const host = new URL(url).hostname.toLowerCase()
-    return host.startsWith('www.') ? host.slice(4) : host
-  } catch {
-    return url.toLowerCase()
-  }
-}
-
-/** 每个域名最多保留 limit 条（0=不限制）。 */
-export function dedupeByDomain<T extends SearchSource>(sources: T[], limit: number): T[] {
-  if (limit <= 0) return sources
-  const seen = new Map<string, number>()
-  const out: T[] = []
-  for (const src of sources) {
-    const d = domainOf(src.url)
-    const c = seen.get(d) ?? 0
-    if (c >= limit) continue
-    seen.set(d, c + 1)
-    out.push(src)
-  }
-  return out
-}
-
-export function queryTokens(query: string): string[] {
-  return (query || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean)
-}
-
-function relevanceScore(src: SearchSource, tokens: string[]): number {
-  const t = (src.title ?? '').toLowerCase()
-  const sn = (src.snippet ?? '').toLowerCase()
-  let score = 0
-  for (const tok of tokens) {
-    if (t.includes(tok)) score += 2
-    if (sn.includes(tok)) score += 1
-  }
-  return score
-}
-
-/** 按查询词与标题/摘要的相关度降序排序（稳定：同分保持原序）。 */
-export function sortByRelevance(sources: SearchSource[], query: string): SearchSource[] {
-  const tokens = queryTokens(query)
-  return [...sources].sort((a, b) => relevanceScore(b, tokens) - relevanceScore(a, tokens))
-}
-
-/** 简单 TTL 内存缓存（省 key 额度，避免重复请求）。 */
-const cacheStore = new Map<string, { at: number; result: SearchResult }>()
-
-/** 当前配置涉及的全部引擎 endpoint（进缓存 key：换实例/镜像后不得命中旧结果）。由 ENGINE_SPECS 驱动。 */
-function activeEndpointsOf(cfg: Config): string {
-  const bag = cfg as unknown as Record<string, unknown>
-  return ENGINE_SPECS.map((s) => String(bag[s.endpointKey] ?? '')).join(',')
-}
-
-export function cacheKeyOf(cfg: Config, query: string, maxResults: number): string {
-  return [cfg.provider, cfg.mergeResults ? 'm' : 'f', (cfg.fallbackProviders ?? []).join(','),
-    String(cfg.maxProviderQueries), query, String(maxResults),
-    String(cfg.maxPerDomain ?? 0), cfg.relevanceSort ? 'r' : '', String(cfg.snippetMaxLength ?? 0),
-    activeEndpointsOf(cfg)].join('|')
-}
-
-function cacheGet(key: string, ttlMs: number): SearchResult | undefined {
-  const entry = cacheStore.get(key)
-  if (entry === undefined) return undefined
-  if (Date.now() - entry.at > ttlMs) { cacheStore.delete(key); return undefined }
-  return entry.result
-}
-
-function cacheSet(key: string, result: SearchResult, ttlMs: number): void {
-  if (cacheStore.size > 500) {
-    const now = Date.now()
-    for (const [k, v] of [...cacheStore]) { if (now - v.at > ttlMs) cacheStore.delete(k) }
-  }
-  cacheStore.set(key, { at: Date.now(), result })
-}
-
-/** 近并发请求防击穿：同 key 进行中的请求共享一个 promise。 */
-const inflight = new Map<string, Promise<SearchResult>>()
-
-async function cacheGetOrCompute(key: string, cfg: Config, compute: () => Promise<SearchResult>): Promise<SearchResult> {
-  if (cfg.cacheEnabled) {
-    const hit = cacheGet(key, cfg.cacheTtlMs)
-    if (hit !== undefined) return hit
-    const running = inflight.get(key)
-    if (running !== undefined) return running
-  }
-  const task = (async () => {
-    const result = await compute()
-    if (cfg.cacheEnabled) cacheSet(key, result, cfg.cacheTtlMs)
-    return result
-  })()
-  if (cfg.cacheEnabled) {
-    inflight.set(key, task)
-    try { return await task } finally { inflight.delete(key) }
-  }
-  return task
-}
-
-/** 带并发上限的并行执行：items 按序，fn 并发数 ≤ limit，结果保持原顺序。
- *  任一 fn 抛错时停止派发新任务，等全部在途任务落定后抛出第一个错误（避免 unhandled rejection）。 */
-async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  if (limit <= 1) {
-    const out: R[] = []
-    for (const it of items) out.push(await fn(it))
-    return out
-  }
-  const out: R[] = new Array(items.length)
-  let i = 0
-  let stopped = false
-  let firstError: unknown
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (!stopped) {
-      const idx = i++
-      if (idx >= items.length) break
-      try {
-        out[idx] = await fn(items[idx])
-      } catch (error) {
-        firstError = error
-        stopped = true
-        break
-      }
-    }
-  })
-  await Promise.allSettled(workers)
-  if (firstError !== undefined) throw firstError
-  return out
-}
-
-// ── 每源熔断（临时健康检查）──
-const circuitState = new Map<string, { failures: number; openUntil: number }>()
-
-/** 对外只读的熔断状态（设置页统计面板用）。 */
-export function getCircuitStates(): Record<string, { open: boolean; failures: number }> {
-  const out: Record<string, { open: boolean; failures: number }> = {}
-  const now = Date.now()
-  for (const [id, st] of circuitState) {
-    out[id] = { open: st.openUntil !== undefined && now < st.openUntil, failures: st.failures }
-  }
-  return out
-}
-
-function circuitOpen(cfg: Config, id: string): boolean {
-  if (!cfg.circuitEnabled) return false
-  const st = circuitState.get(id)
-  return st !== undefined && st.openUntil !== undefined && Date.now() < st.openUntil
-}
-
-function circuitMarkSuccess(id: string): void {
-  circuitState.delete(id)
-}
-
-function circuitMarkFailure(cfg: Config, id: string): void {
-  if (!cfg.circuitEnabled) return
-  const st = circuitState.get(id) ?? { failures: 0, openUntil: 0 }
-  st.failures += 1
-  if (st.failures >= cfg.circuitFailureLimit) {
-    st.openUntil = Date.now() + cfg.circuitCooldownMs
-    st.failures = 0
-  }
-  circuitState.set(id, st)
-}
-
-// ── 每源用量统计 ──
-const searchStats = new Map<string, { requests: number; errors: number; latencyMs: number; lastError?: string }>()
-
-function recordStat(id: string, ok: boolean, latencyMs: number, errMessage?: string): void {
-  const st = searchStats.get(id) ?? { requests: 0, errors: 0, latencyMs: 0 }
-  st.requests += 1
-  if (ok) st.latencyMs += latencyMs
-  else { st.errors += 1; st.lastError = errMessage ?? st.lastError }
-  searchStats.set(id, st)
-}
-
-export function getSearchStats(): Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> {
-  const out: Record<string, { requests: number; errors: number; avgLatencyMs: number; lastError?: string }> = {}
-  for (const [id, st] of searchStats) {
-    const success = st.requests - st.errors
-    out[id] = { requests: st.requests, errors: st.errors, avgLatencyMs: success > 0 ? Math.round(st.latencyMs / success) : 0, ...(st.lastError !== undefined ? { lastError: st.lastError } : {}) }
-  }
-  return out
-}
-
-export function resetSearchStats(): void {
-  searchStats.clear()
-}
-
 
 /** 异步判断某内置源是否“可用”：字面量 → credentials 服务 → 启动环境，与真实搜索同一解析链。
  *  由 ENGINE_SPECS 的凭据输入行驱动（不带凭据的引擎如 searxng 恒可用）；
@@ -858,7 +410,12 @@ export class ProviderRegistry extends Service {
   readonly sources = new Map<string, SearchSourceAdapter>()
   constructor(ctx: Context) { super(ctx, PROVIDER_SERVICE_ID) }
 
-  register(adapter: SearchSourceAdapter): () => void {
+  register(adapter: SearchSourceAdapter, internal = false): () => void {
+    // 内置引擎 id 属于本插件保留命名空间：第三方源不得静默覆盖内置实现
+    if (!internal && getEngineSpec(adapter.id) !== undefined) {
+      this.ctx.logger?.warn?.('[web-search-thirdparty] "' + adapter.id + '" 是内置引擎 id，第三方注册被忽略（请换一个 id）')
+      return () => {}
+    }
     if (this.sources.has(adapter.id)) {
       // 热重载场景下第三方插件会重复注册同一 id：警告并替换，不再抛错炸掉对方插件
       this.ctx.logger?.warn?.('[web-search-thirdparty] search source "' + adapter.id + '" 已注册，将被替换（热重载）')
@@ -912,14 +469,58 @@ function abortErrorOf(controller: AbortController): WebError {
   return new WebError('web-search-thirdparty: ' + detail, 'WEB_ABORTED')
 }
 
+/**
+ * 同步可判定性：字面量 → 启动环境变量。credentials 服务里的 key 只能异步解析，
+ * 同步没看到时保持乐观（true），由 refreshAvailability() 的探测结果修正。
+ */
+export function syncKeyAvailable(ctx: AppContext, cfg: Config, id: string): boolean {
+  const spec = getEngineSpec(id)
+  if (spec === undefined) return true // 自定义源：交给 adapter.available
+  const bag = cfg as unknown as Record<string, string | undefined>
+  let hasCredentialsService = false
+  try { hasCredentialsService = ctx.get('credentials') !== undefined } catch { hasCredentialsService = false }
+  for (const input of engineInputs(spec)) {
+    if (input.envRefKey === undefined || input.envVar === undefined) continue // 非凭据输入
+    if ((bag[input.configKey] ?? '').length > 0) continue // 字面量已配置
+    let ambient = ''
+    try { ambient = launchEnvironmentOf(ctx).get(bag[input.envRefKey] || input.envVar)?.value ?? '' } catch { ambient = '' }
+    if (ambient.length > 0) continue
+    // credentials 服务在场时异步凭据可能提供该 key：保持乐观，交给探测修正
+    if (hasCredentialsService) continue
+    return false
+  }
+  return true
+}
+
 export class ThirdPartySearchProvider implements SearchProvider {
   readonly id = PROVIDER_ID
+  /** 异步探测得到的每源可用性（apply 时与每次配置变更后刷新）。 */
+  private readonly probed = new Map<string, boolean>()
   constructor(private readonly resolveOptions: () => Resolved) {}
 
-  available(): boolean {
+  /** 用与真实搜索同一套凭据解析链刷新各内置源的可用性（供 available() 同步读取）。 */
+  async refreshAvailability(): Promise<void> {
     const r = this.resolveOptions()
-    const registry = r.ctx.get(PROVIDER_SERVICE_ID) as ProviderRegistry | undefined
-    return registry !== undefined && registry.sources.has(r.cfg.provider)
+    for (const spec of ENGINE_SPECS) {
+      try {
+        this.probed.set(spec.id, await builtinKeyAvailable(r.ctx, r.cfg, spec.id))
+      } catch {
+        this.probed.delete(spec.id) // 探测失败不算结论，交回同步判断
+      }
+    }
+  }
+
+  available(): boolean {
+    try {
+      const r = this.resolveOptions()
+      const registry = r.ctx.get(PROVIDER_SERVICE_ID) as ProviderRegistry | undefined
+      if (registry === undefined || !registry.sources.has(r.cfg.provider)) return false
+      const probed = this.probed.get(r.cfg.provider)
+      if (probed !== undefined) return probed
+      return syncKeyAvailable(r.ctx, r.cfg, r.cfg.provider)
+    } catch {
+      return true // 可用性探测本身绝不能成为失败源
+    }
   }
 
   async search(request: SearchRequest, signal?: AbortSignal): Promise<SearchResult> {
@@ -1014,6 +615,7 @@ export class ThirdPartySearchProvider implements SearchProvider {
         // 先截断会让域名限额把结果砍穿、相关度排序也只在残集里做。
         let processed = dedupeByDomain(sources, r.cfg.maxPerDomain)
         if (r.cfg.relevanceSort) processed = sortByRelevance(processed, request.query)
+        const beforeSlice = processed.length
         processed = processed.slice(0, maxResults)
 
         return {
@@ -1022,7 +624,8 @@ export class ThirdPartySearchProvider implements SearchProvider {
             ...(src.snippet !== undefined ? { snippet: cleanSnippet(src.snippet, r.cfg.snippetMaxLength) } : {}),
           })),
           ...(content !== undefined ? { content } : {}),
-          truncated: false,
+          // 诚实上报：门面自己按 maxResults 砍掉过结果时置 true（seam 仍会按 request.maxResults 复核）
+          truncated: beforeSlice > processed.length,
         } as SearchResult
       }
 
@@ -1033,7 +636,6 @@ export class ThirdPartySearchProvider implements SearchProvider {
     }
   }
 }
-
 function resolveOptions(ctx: AppContext, cfg: Config): Resolved {
   return { ctx, cfg }
 }
@@ -1127,7 +729,9 @@ function registerRoutes(ctx: AppContext, current: () => Config): void {
           }
         }
         try {
-          const result = await engine(r, { query: 'test', maxResults: 1 }, undefined)
+          // 多取几条（上限 3）：既验证连通性，也覆盖引擎的 num/max_results/count 参数路径
+          const probeMax = Math.max(1, Math.min(3, r.cfg.maxResults))
+          const result = await engine(r, { query: 'test', maxResults: probeMax }, undefined)
           const latencyMs = Date.now() - started
           const first = result.sources[0]
           sendJson(res, 200, {
@@ -1154,158 +758,13 @@ function registerRoutes(ctx: AppContext, current: () => Config): void {
           sendJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'GET only' } })
           return
         }
-        sendJson(res, 200, { ok: true, stats: getSearchStats(), circuit: getCircuitStates() })
+        sendJson(res, 200, { ok: true, stats: getSearchStats(), circuit: getCircuitStates(), cache: getCacheStats() })
       }
       const disposeTest = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/test', handler })
       const disposeStats = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/stats', handler: statsHandler })
       return () => { disposeTest?.(); disposeStats?.() }
     }, 'web-search-thirdparty: test + stats routes')
   })
-}
-
-
-/** 剥掉 IPv6 字面量的方括号（URL.hostname 对 IPv6 返回 “[::1]” 形式，不剥会绕过所有前缀判断）。 */
-function stripHostBrackets(host: string): string {
-  const h = host.toLowerCase().trim()
-  return h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h
-}
-
-export function isPrivateIp(addr: string): boolean {
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr)
-  if (v4 !== null) {
-    const a = Number(v4[1]); const b = Number(v4[2]); const c = Number(v4[3]); const d = Number(v4[4])
-    if (a > 255 || b > 255 || c > 255 || d > 255) return true // 非法段按不可信处理
-    if (a === 0 || a === 10 || a === 127) return true // this-network / 私网 / 环回
-    if (a === 172 && b >= 16 && b <= 31) return true
-    if (a === 192 && b === 168) return true
-    if (a === 169 && b === 254) return true // link-local（云元数据）
-    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
-    return false
-  }
-  const lower = addr.toLowerCase()
-  if (lower === '::1' || lower === '::') return true
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true // ULA fc00::/7
-  if (/^fe[89ab]/.test(lower)) return true // link-local fe80::/10
-  if (lower.startsWith('::ffff:')) {
-    // IPv4-mapped：::ffff:a.b.c.d 点分形式，或 WHATWG 压缩后的十六进制 ::ffff:7f00:1
-    const tail = lower.slice(7)
-    if (tail.includes('.')) return isPrivateIp(tail)
-    const parts = tail.split(':')
-    if (parts.length === 2) {
-      const hi = Number.parseInt(parts[0], 16)
-      const lo = Number.parseInt(parts[1], 16)
-      if (Number.isFinite(hi) && Number.isFinite(lo) && hi >= 0 && hi <= 0xffff && lo >= 0 && lo <= 0xffff) {
-        return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`)
-      }
-    }
-    return true // 无法识别的映射形态一律按私网处理（保守拒绝）
-  }
-  return false
-}
-
-export function isPrivateName(host: string): boolean {
-  const h = stripHostBrackets(host).replace(/\.$/, '')
-  if (h.length === 0) return true
-  if (h === 'localhost' || h.endsWith('.localhost')) return true
-  if (h === 'metadata.google.internal' || h === 'instance-data') return true
-  if (/^\d|^[0-9a-f:]+$/i.test(h)) return isPrivateIp(h)
-  return false
-}
-
-export async function assertPublicUrl(url: URL, cfg: Config): Promise<void> {
-  if (cfg.fetchAllowPrivate) return
-  const host = stripHostBrackets(url.hostname)
-  if (host.length === 0 || isPrivateName(host)) {
-    throw new WebError('blocked private / loopback address: ' + host, 'WEB_FETCH_BLOCKED_PRIVATE')
-  }
-  try {
-    // IP 字面量在 node:dns 中原样返回，同样会被复查一遍
-    const addrs = await dnsLookup(host, { all: true })
-    for (const a of addrs) {
-      if (isPrivateIp(a.address)) {
-        throw new WebError('blocked private network address: ' + a.address + ' (' + host + ')', 'WEB_FETCH_BLOCKED_PRIVATE')
-      }
-    }
-  } catch (error) {
-    if (error instanceof WebError) throw error
-    // DNS 解析失败不再放行：解析路径不一致正是 rebinding 的入口，宁可保守拒绝
-    throw new WebError('blocked: DNS resolution failed for "' + host + '"', 'WEB_FETCH_BLOCKED_PRIVATE', { cause: error })
-  }
-}
-
-/** 手动逐跳跟随重定向（默认 follow 不会复查 Location），每一跳都重新过 SSRF 校验。 */
-const MAX_REDIRECT_HOPS = 5
-
-async function fetchManualRedirects(target: URL, headers: Record<string, string>, cfg: Config, signal: AbortSignal): Promise<Response> {
-  let current = target
-  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
-    await assertPublicUrl(current, cfg)
-    const res = await fetch(current, { method: 'GET', signal, redirect: 'manual', headers })
-    const location = res.headers.get('location')
-    if (location === null || res.status < 300 || res.status >= 400) return res
-    try { await res.arrayBuffer() } catch { /* 释放连接 */ }
-    if (hop === MAX_REDIRECT_HOPS) {
-      throw new WebError(`too many redirects (> ${MAX_REDIRECT_HOPS})`, 'WEB_PROVIDER_ERROR')
-    }
-    let next: URL
-    try {
-      next = new URL(location, current)
-    } catch {
-      throw new WebError('invalid redirect location: ' + location, 'WEB_PROVIDER_ERROR')
-    }
-    if (next.protocol !== 'http:' && next.protocol !== 'https:') {
-      throw new WebError(`redirect to unsupported protocol "${next.protocol}"`, 'WEB_PROVIDER_ERROR')
-    }
-    current = next
-  }
-  throw new WebError(`too many redirects (> ${MAX_REDIRECT_HOPS})`, 'WEB_PROVIDER_ERROR')
-}
-
-
-/** 常用命名实体（其余走数字/十六进制通用解码）。 */
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-  copy: '©', reg: '®', trade: '™', hellip: '…', mdash: '—', ndash: '–',
-  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', laquo: '«', raquo: '»',
-  middot: '·', bull: '•', deg: '°', plusmn: '±', times: '×', divide: '÷',
-  euro: '€', pound: '£', yen: '¥', cent: '¢', sect: '§', para: '¶', eacute: 'é',
-}
-
-/** 通用 HTML 实体解码：命名 + &#123; 十进制 + &#x1F; 十六进制；未知实体原样保留。 */
-export function decodeEntities(input: string): string {
-  return input.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
-    if (body.startsWith('#')) {
-      // body 形如 "#x4e2d" / "#39"：十六进制标记在 # 之后
-      const code = /^#[xX]/.test(body)
-        ? Number.parseInt(body.slice(2), 16)
-        : Number.parseInt(body.slice(1), 10)
-      if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
-        try { return String.fromCodePoint(code) } catch { return m }
-      }
-      return m
-    }
-    return NAMED_ENTITIES[body.toLowerCase()] ?? m
-  })
-}
-
-function stripInlineTags(html: string): string {
-  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
-}
-
-/** 极简 HTML→Markdown 清洗：去 script/style、块级换行、标题/链接/图片转 Markdown、解码实体、折叠空白。 */
-export function htmlToMarkdown(html: string): string {
-  let s = String(html)
-  s = s.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-  s = s.replace(/<style[\s\S]*?<\/style>/gi, ' ')
-  s = s.replace(/<\/(?:p|div|li|tr|section|article|table|ul|ol|blockquote|nav|header|footer)>/gi, '\n')
-  s = s.replace(/<(?:br|hr)\s*\/?>/gi, '\n')
-  s = s.replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, (_m: unknown, src: string) => '![image](' + src + ')')
-  s = s.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m: unknown, href: string, txt: string) => '[' + stripInlineTags(txt) + '](' + href + ')')
-  s = s.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m: unknown, lvl: string, txt: string) => '#'.repeat(Number(lvl)) + ' ' + stripInlineTags(txt) + '\n')
-  s = s.replace(/<[^>]+>/g, ' ')
-  s = decodeEntities(s)
-  s = s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim()
-  return s
 }
 
 /** 简易抓取 provider：取正文文本并截断，供官方 web_fetch 工具使用。 */
@@ -1364,24 +823,34 @@ export class LocalFetchProvider implements WebFetchProvider {
     }
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 插件入口：注册 settings 分区 + 注册 provider + 测试路由
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function apply(ctx: AppContext, config: Config): void {
   let current = () => config
-  installSettingsSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+  const searchProvider = new ThirdPartySearchProvider(() => resolveOptions(ctx, current()))
+  // 卸载 / 热重载时清空缓存、熔断与统计，避免旧一代状态残留到新一代
+  ctx.effect(() => () => resetRuntimeState(), 'web-search-thirdparty: runtime state')
+  installSettingsSectionCompat(ctx, SETTINGS_NAMESPACE, Config, config, {
     setSource: (source) => { current = source },
-    onChange: () => {},
+    onChange: () => {
+      // 配置变更后刷新每源可用性（凭据可能刚被填上）
+      void searchProvider.refreshAvailability().catch(() => {})
+    },
   })
   // 开放注册表服务：提供在 ctx 上，其它插件可注入注册自定义搜索源。
   const registry = new ProviderRegistry(ctx)
   for (const spec of ENGINE_SPECS) {
-    registry.register(builtinAdapter(ctx, spec))
+    registry.register(builtinAdapter(ctx, spec), true)
   }
-  ctx.web.registerSearchProvider(new ThirdPartySearchProvider(() => resolveOptions(ctx, current())))
-  ctx.web.registerFetchProvider(new LocalFetchProvider(() => resolveOptions(ctx, current())))
+  void searchProvider.refreshAvailability().catch(() => {})
+  ctx.web.registerSearchProvider(searchProvider)
+  // 自带抓取 provider：enableFetchProvider=false 可关闭（把 web_fetch 交回宿主的官方 provider）
+  if (config.enableFetchProvider !== false) {
+    ctx.web.registerFetchProvider(new LocalFetchProvider(() => resolveOptions(ctx, current())))
+  }
   registerRoutes(ctx, current)
   ctx.logger?.info?.('[web-search-thirdparty] 第三方搜索 provider 已注册（id=' + PROVIDER_ID + '，源码数 ' + registry.list().join(',') + '）')
 }
+

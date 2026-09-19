@@ -222,8 +222,8 @@ describe('provider chain availability', () => {
   it('includes keyed sources whose key lives only in the credentials service', async () => {
     const credentials = { resolve: async () => ({ value: 'from-credentials' }) }
     const reg = new ProviderRegistry(fakeRegistryCtx() as any)
-    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!))
-    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!))
+    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!), true)
+    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!), true)
     const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
     const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
     const chain = await buildProviderChain(c, reg, ctx as any)
@@ -233,8 +233,8 @@ describe('provider chain availability', () => {
   it('excludes keyed sources without any resolvable credential', async () => {
     const credentials = { resolve: async () => { throw new Error('no such credential') } }
     const reg = new ProviderRegistry(fakeRegistryCtx() as any)
-    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!))
-    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!))
+    reg.register(builtinAdapter({} as any, getEngineSpec('searxng')!), true)
+    reg.register(builtinAdapter({} as any, getEngineSpec('tavily')!), true)
     const c = cfg({ provider: 'searxng', tavilyApiKey: '', tavilyApiKeyEnv: 'TAVILY_API_KEY' })
     const ctx = { get: (n: string) => (n === 'credentials' ? credentials : undefined), web: {} }
     const chain = await buildProviderChain(c, reg, ctx as any)
