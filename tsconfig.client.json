@@ -1,0 +1,25 @@
+{
+  // 客户端半边（src/client）的独立类型检查配置。
+  //
+  // 根 tsconfig.json 故意 exclude 了 src/client（它由 tsdown 打包、不进 tsc 产物），
+  // 但那样一来，客户端代码里的未定义标识符、以及漏掉 inject/apply 这类契约破坏
+  // 都不会被任何环节拦住 —— 曾经因此把少了 exports.inject 的 bundle 发出去，
+  // 表现是 DSH 启动页报 "Failed to load plugin dsh-web-search-thirdparty"。
+  // 该配置专治这个盲区，由 `npm run typecheck` 调用（CI 也会跑）。
+  //
+  // 这里不复用 extends：根配置的 declarationDir 会与 noEmit 冲突（TS5069）。
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "sourceMap": false
+  },
+  "include": ["src/client", "src/engine-spec.ts"]
+}

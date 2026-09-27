@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.2] - 2026-09-27
+
+修复 0.4.1 引入的**加载期事故**：客户端 bundle 少了 `exports.inject`，DSH 启动页直接报
+`Failed to load plugin dsh-web-search-thirdparty`，profile 起不来。
+
+### Fixed（本次事故）
+- **`src/client/index.ts` 的 `export const inject` 被误删**。0.4.1 重构时用脚本删除重复代码，
+  把「移到 `./scope.ts` 的部分」连同**没有备份的** `inject` / `PROVIDERS` / `specOf` /
+  `RESET_FIELDS` 一起删掉了。后果分两层：
+  - `inject` 缺失 → DSH 客户端模块加载器拒绝该模块 → 启动页报 `Failed to load plugin`；
+  - 其余三个标识符悬空 → 就算能加载，设置页一挂载就会 `ReferenceError`。
+  现已全部还原（对比 0.4.0 的顶层声明逐个核对过）。
+- 根 `tsconfig.json` 一直 `exclude: ["src/client"]`，打包器也不做未定义标识符检查，所以
+  typecheck / build / 99 个测试**全绿**却产出了坏包。本次补上两道闸：
+  - **`tsconfig.client.json`**：给 `src/client` 单独做类型检查（DOM lib + React types），
+    并接进 `npm run typecheck`（CI 会跑）。它当场又抓出 5 处此前无人看管的问题；
+  - **`tests/client-contract.test.ts`**：既断言源码导出面，也**用假 `window.__ModuleLoader__`
+    真正执行 `lib/client.js`**，断言加载器拿到的模块带 `apply`/`inject`。
+    已做变异验证：删掉 `exports.inject` 后该测试立刻失败。
+- 顺带修掉类型检查暴露的既有问题：
+  - `SettingsShape` 缺 `mergeResults` / `maxPerDomain` / `relevanceSort` / `cacheEnabled` /
+    `cacheTtlMs`（只是类型缺项，运行时无碍）；
+  - `ENGINE_RESET_FIELDS` 里 `.concat([可选 key])` 触发 `concat` 重载不匹配 ——
+    改为先对可选 key 单独 `filter` 再展开（语义不变，类型干净）。
+
+### 事故复盘（为什么之前没发现）
+0.4.1 的验证只覆盖了**宿主半边**（设置分区是否被服务、写入是否落盘、搜索是否可用），
+从未验证**客户端半边能否被加载器接受**。本次补上浏览器同款验证：从隔离实例把服务器真正
+下发的客户端 bundle 取回来执行，确认导出 `apply`/`inject`。
+
 ## [0.4.1] - 2026-09-27
 
 修复「设置页填入 Tavily key → 点保存 → key 被清空」：根因是 DSH 0.1.7 换了设置服务，

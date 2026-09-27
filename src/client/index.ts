@@ -4,17 +4,8 @@
  * React function component (built with React.createElement, no JSX). The form
  * itself stays vanilla DOM for theme-friendly native controls.
  *
- * 两代设置 API 的适配都在这里：
- *
- *   ≥ 0.1.7-alpha.1（C 代）：`ctx.configForms.get(<条目 id>)`。分区名 = profile 组合条目 id
- *     （本插件 cordis.patch.yml 里 insert 的 `id: web-search-thirdparty`），宿主只把 schema 上
- *     声明为 volatile 的字段投影成表单；敏感字段被脱敏后**不会**下发，字段是否存在要靠
- *     describe 边车里的 `secrets`（`{ path, set }`）判断。
- *   ≤ 0.1.6-alpha.2（A/B 代）：`ctx.settingsScope.bind({ namespace })`，分区名是本插件自己
- *     installSection 注册的字面量 `dsh-web-search-thirdparty`；旧版 describe 不带 `secrets`
- *     边车（0.1.6 的客户端会把它丢掉），所以敏感字段只能提示“留空表示不修改”。
- *
- * 两条路径都实现成同一个 {@link SettingsScopeAdapter}，表单逻辑只认这一个接口。
+ * 两代设置 API 的适配都在 `./scope.ts`，表单逻辑只认那一个 {@link SettingsScopeAdapter} 接口。
+ * 本文件只负责 DOM 表单与宿主路由交互。
  */
 import * as React from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
@@ -23,6 +14,52 @@ import { ENGINE_SPECS } from '../engine-spec.js'
 import type { EngineFieldSpec } from '../engine-spec.js'
 import { buildSaveOps, createScopeAdapter } from './scope.js'
 import type { SettingsScopeAdapter } from './scope.js'
+
+// 引擎清单 / 高级参数 / 凭据输入行全部由共享的 ENGINE_SPECS 派生，不再手工维护两份
+const PROVIDERS = ENGINE_SPECS.map((s) => ({ id: s.id, label: s.label }))
+
+function specOf(provider: string) {
+  return ENGINE_SPECS.find((s) => s.id === provider)
+}
+
+const GLOBAL_RESET_FIELDS = [
+  'provider', 'timeoutMs', 'maxResults', 'snippetMaxLength',
+  'mergeResults', 'fallbackProviders', 'maxProviderQueries',
+  'maxPerDomain', 'relevanceSort', 'cacheEnabled', 'cacheTtlMs',
+  'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs',
+  'enableFetchProvider', 'fetchAllowPrivate', 'statsEnabled', 'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
+  'retryCount', 'retryBackoffMs', 'extraHeadersJson',
+]
+
+const ENGINE_RESET_FIELDS = [
+  ...new Set(
+    ENGINE_SPECS.flatMap((s) => [
+      s.endpointKey,
+      ...[s.input, ...(s.secondInput !== undefined ? [s.secondInput] : [])].map((i) => i.configKey),
+      // credentials 引用字段是可选的：先分开过滤，再并进结果（直接 concat 会让 TS 的
+      // concat 重载拿到 (string|undefined)[] 而报错）
+      ...[s.input.envRefKey, s.secondInput?.envRefKey].filter((k): k is string => typeof k === 'string'),
+      ...s.fields.map((f) => f.key),
+    ]),
+  ),
+]
+
+const RESET_FIELDS: string[] = [...GLOBAL_RESET_FIELDS, ...ENGINE_RESET_FIELDS]
+
+/**
+ * 只声明真正必需的服务（cordis 的 `inject` 是硬依赖）。
+ *
+ * ⚠ 本插件的设置服务在两代里名字不同：C 代（≥0.1.7）是 `configForms`，A/B 代是 `settingsScope`。
+ * 把任一名字写进 `inject` 都会让客户端插件在新/旧 DSH 上永远等不到服务而**整个加载失败**，
+ * 所以两个都按可选服务在运行期探测（见 `scope.ts`）。
+ *
+ * ⚠ 这个导出必须留在客户端入口里：DSH 的客户端模块加载器要求客户端插件导出 `apply`（以及
+ * `inject`）。它曾经被一次重构误删，而 `tsconfig.json` 排除了 `src/client`、打包器又不会做
+ * 未定义标识符检查，于是产出的 bundle 少了 `exports.inject`，表现就是启动页报
+ * “Failed to load plugin dsh-web-search-thirdparty”。现在由 `tests/client-contract.test.ts`
+ * 和 `tsconfig.client.json` 双重看住。
+ */
+export const inject = ['slots']
 
 function providerKeyLabel(provider: string): string {
   return specOf(provider)?.input.label ?? 'API Key'

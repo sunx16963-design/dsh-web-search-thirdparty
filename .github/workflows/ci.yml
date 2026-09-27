@@ -14,7 +14,11 @@ jobs:
           # 用 Node 20 会回退到可选 peer `unrun` 并失败。
           node-version: '24'
       - run: npm ci
+      # typecheck 同时覆盖宿主（tsconfig.json）与客户端半边（tsconfig.client.json）；
+      # 后者曾长期缺失，导致 src/client 的未定义标识符与 inject/apply 契约破坏无人把关。
       - run: npm run typecheck
+      # build 必须在 test 之前：tests/client-contract.test.ts 会真正执行 lib/client.js，
+      # 也就是浏览器实际收到的那份产物。
       - run: npm run build
       - run: npm test
       - run: npm pack

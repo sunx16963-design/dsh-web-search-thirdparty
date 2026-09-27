@@ -24,12 +24,21 @@ export const LEGACY_NAMESPACE = 'dsh-web-search-thirdparty'
 /** 先按顺序找被宿主服务的分区，找不到再按 schema 特征兜底（条目 id 被改名也不会瞎掉）。 */
 export const NAMESPACE_CANDIDATES = [ENTRY_ID, LEGACY_NAMESPACE]
 
-/** 本页会用到的设置字段（只用于类型提示，实际值来自宿主）。 */
+/**
+ * 本页会用到的设置字段（只用于类型提示，实际值来自宿主）。
+ * 覆盖 `src/client/index.ts` 里直接读写的每一项；缺项会在 `npm run typecheck` 的
+ * 客户端配置（tsconfig.client.json）里报错 —— 这正是当年漏掉的那道闸。
+ */
 export interface SettingsShape {
   provider?: string
   enableFetchProvider?: boolean
   searxngBaseURL?: string
   maxResults?: number
+  mergeResults?: boolean
+  maxPerDomain?: number
+  relevanceSort?: boolean
+  cacheEnabled?: boolean
+  cacheTtlMs?: number
   tavilyApiKey?: string
   serperApiKey?: string
   braveApiKey?: string
