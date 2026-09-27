@@ -12,7 +12,28 @@ Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 ## Version compatibility
 
-Supports the latest DSH, and stays compatible with the older settings API (from `0.1.0-rc.6`).
+Supports the latest DSH, and stays compatible with the older settings API (from `0.1.0-rc.6`):
+
+| DSH settings service | How to recognise it | What this plugin does |
+| --- | --- | --- |
+| ≥ `0.1.7-alpha.1` | `dsh-settings` exports `SettingsForms`; the settings document serves each profile entry's own `Config` by **entry id** and projects only `.volatile()` fields | every editable Config field is `.volatile()`; the client uses `ctx.configForms.get('web-search-thirdparty')`; the namespace is the composed entry id |
+| `0.1.2` – `0.1.6-alpha.2` | exports `SettingsProvider` with `installSection` | Config is **not** volatile; the client uses `ctx.settingsScope.bind({ namespace: 'dsh-web-search-thirdparty' })` |
+| ≤ `0.1.1-rc.2` | top-level `installSettingsSection` helper | same as above, registration goes through the helper |
+
+The generation is detected at runtime (`settingsGeneration()`) and both paths are covered by tests.
+**Note:** if your DSH is ≥ 0.1.7 while `@deepseek-ai/schemastery` is below `3.18.3` (`.volatile()`
+only exists from 3.18.3), the plugin logs an explicit warning and the settings page cannot save.
+
+### Troubleshooting: the API key looks “cleared” after saving
+
+Check the **runtime status** line under the key input (served by
+`GET /api/web-search-thirdparty/config`):
+
+- “Runtime status: key usable ✓” — the save worked. Secrets are never echoed back, so the input
+  box being empty is intentional; leaving it blank means “keep the current value”.
+- “Not configured” — the key never reached the host. Check, in order: a
+  `schemastery version too old` warning in the log; whether the plugin is actually listed in the
+  profile's `dsh.profile.bundles`; and whether `dsh web` was restarted as the installer requires.
 
 ## Requirements
 
@@ -47,6 +68,9 @@ SearXNG, Tavily, Bing, Brave, Serper, or Google — and ships an SSRF-guarded fe
 - An open provider-registration API so other plugins can add their own search source.
 - Per-source circuit breaker and usage statistics (settings page panel and
   `GET /api/web-search-thirdparty/stats`, including cache counters and circuit state).
+- Runtime configuration self-check: `GET /api/web-search-thirdparty/config` reports, per engine,
+  whether it is actually usable right now (through the same credential chain real searches use);
+  the settings page renders it as the runtime status line.
 
 ## Supported engines
 
@@ -130,10 +154,15 @@ supported by this manager version.
 
 ## Configuration
 
-Settings live under the `dsh-web-search-thirdparty` namespace:
+What you save in the settings page lands in the **current profile's patch document**. The namespace
+depends on the DSH generation:
+
+- DSH ≥ 0.1.7: the namespace is the composed entry id, i.e. `web-search-thirdparty`.
+- DSH ≤ 0.1.6: the namespace is the plugin's registered namespace, i.e. `dsh-web-search-thirdparty`
+  (written to `settings.yaml`).
 
 ```yaml
-dsh-web-search-thirdparty:
+web-search-thirdparty:          # dsh-web-search-thirdparty on ≤ 0.1.6
   provider: searxng
   searxngBaseURL: https://searx.be   # or your own instance
   maxResults: 8
@@ -149,6 +178,9 @@ dsh-web-search-thirdparty:
   # (also remove the `fetchProvider` line from this plugin's bundle patch).
   enableFetchProvider: true
 ```
+
+> On DSH ≥ 0.1.7 every configuration field is `volatile()`, so a settings-page write takes effect
+> on the next search **without a restart**.
 
 ### Config-file-only knobs
 

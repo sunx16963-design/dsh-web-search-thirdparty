@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-thirdparty",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE) and provides a web_fetch provider. Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
   "type": "module",
   "main": "./lib/index.js",
@@ -38,7 +38,7 @@
     "node": ">=22.19"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -50,6 +50,7 @@
     "@deepseek-ai/dsh-web": ">=0.1.0-rc.6"
   },
   "devDependencies": {
+    "@deepseek-ai/cosmokit": "^1.8.5",
     "@types/node": "^24.13.3",
     "@types/react": "^18.3.0",
     "react": "^18.3.1",

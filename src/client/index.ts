@@ -3,58 +3,26 @@
  * The settings shell mounts section components as React components, so this is a
  * React function component (built with React.createElement, no JSX). The form
  * itself stays vanilla DOM for theme-friendly native controls.
+ *
+ * 两代设置 API 的适配都在这里：
+ *
+ *   ≥ 0.1.7-alpha.1（C 代）：`ctx.configForms.get(<条目 id>)`。分区名 = profile 组合条目 id
+ *     （本插件 cordis.patch.yml 里 insert 的 `id: web-search-thirdparty`），宿主只把 schema 上
+ *     声明为 volatile 的字段投影成表单；敏感字段被脱敏后**不会**下发，字段是否存在要靠
+ *     describe 边车里的 `secrets`（`{ path, set }`）判断。
+ *   ≤ 0.1.6-alpha.2（A/B 代）：`ctx.settingsScope.bind({ namespace })`，分区名是本插件自己
+ *     installSection 注册的字面量 `dsh-web-search-thirdparty`；旧版 describe 不带 `secrets`
+ *     边车（0.1.6 的客户端会把它丢掉），所以敏感字段只能提示“留空表示不修改”。
+ *
+ * 两条路径都实现成同一个 {@link SettingsScopeAdapter}，表单逻辑只认这一个接口。
  */
 import * as React from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ENGINE_SPECS } from '../engine-spec.js'
 import type { EngineFieldSpec } from '../engine-spec.js'
-
-const NAMESPACE = 'dsh-web-search-thirdparty'
-
-// 引擎清单 / 高级参数 / 凭据输入行全部由共享的 ENGINE_SPECS 派生，不再手工维护两份
-const PROVIDERS = ENGINE_SPECS.map((s) => ({ id: s.id, label: s.label }))
-
-function specOf(provider: string) {
-  return ENGINE_SPECS.find((s) => s.id === provider)
-}
-
-const GLOBAL_RESET_FIELDS = [
-  'provider', 'timeoutMs', 'maxResults', 'snippetMaxLength',
-  'mergeResults', 'fallbackProviders', 'maxProviderQueries',
-  'maxPerDomain', 'relevanceSort', 'cacheEnabled', 'cacheTtlMs',
-  'maxProviderConcurrency', 'circuitEnabled', 'circuitFailureLimit', 'circuitCooldownMs',
-  'enableFetchProvider', 'fetchAllowPrivate', 'statsEnabled', 'fetchMaxBodyChars', 'fetchTimeoutMs', 'fetchUserAgent',
-  'retryCount', 'retryBackoffMs', 'extraHeadersJson',
-]
-
-const ENGINE_RESET_FIELDS = [
-  ...new Set(ENGINE_SPECS.flatMap((s) => [
-    s.endpointKey,
-    ...[s.input, ...(s.secondInput !== undefined ? [s.secondInput] : [])]
-      .map((i) => i.configKey)
-      .concat([s.input.envRefKey, s.secondInput?.envRefKey])
-      .filter((k): k is string => typeof k === 'string'),
-    ...s.fields.map((f) => f.key),
-  ])),
-]
-
-const RESET_FIELDS: string[] = [...GLOBAL_RESET_FIELDS, ...ENGINE_RESET_FIELDS]
-
-export const inject = ['slots', 'settingsScope']
-
-interface SettingsShape {
-  provider?: string
-  enableFetchProvider?: boolean
-  searxngBaseURL?: string
-  maxResults?: number
-  tavilyApiKey?: string
-  serperApiKey?: string
-  braveApiKey?: string
-  bingApiKey?: string
-  googleApiKey?: string
-  googleSearchEngineId?: string
-}
+import { buildSaveOps, createScopeAdapter } from './scope.js'
+import type { SettingsScopeAdapter } from './scope.js'
 
 function providerKeyLabel(provider: string): string {
   return specOf(provider)?.input.label ?? 'API Key'
@@ -90,10 +58,22 @@ function row(): HTMLDivElement {
   return el
 }
 
+function hint(text = ''): HTMLDivElement {
+  const el = document.createElement('div')
+  el.textContent = text
+  el.style.cssText = 'font-size:11px;opacity:.75;min-height:14px'
+  return el
+}
+
 /** Build the form DOM and attach handlers. Returns a cleanup. */
-function mountForm(container: HTMLElement, scope: any): () => void {
+function mountForm(container: HTMLElement, scope: SettingsScopeAdapter | undefined): () => void {
   const root = document.createElement('div')
   root.style.cssText = 'display:flex;flex-direction:column;gap:14px;color-scheme:light dark'
+
+  // ── 设置传输层不可用时的明确提示（绝不假装能保存）──
+  const scopeNotice = document.createElement('div')
+  scopeNotice.style.cssText = 'display:none;font-size:12px;padding:6px 8px;border:1px solid currentcolor;border-radius:6px;opacity:.9'
+  root.appendChild(scopeNotice)
 
   const providerRow = row()
   providerRow.appendChild(label('搜索供应商'))
@@ -112,16 +92,20 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   const keyLabel = label(providerKeyLabel('searxng'))
   const keyInput = input('text')
   keyInput.placeholder = providerKeyLabel('searxng')
+  const keyHint = hint()
   keyRow.appendChild(keyLabel)
   keyRow.appendChild(keyInput)
+  keyRow.appendChild(keyHint)
   root.appendChild(keyRow)
 
   const cxRow = row()
   const cxInput = input('text')
   cxInput.placeholder = 'Search Engine ID (cx)'
+  const cxHint = hint()
   cxRow.style.display = 'none'
   cxRow.appendChild(label('Search Engine ID (cx)'))
   cxRow.appendChild(cxInput)
+  cxRow.appendChild(cxHint)
   root.appendChild(cxRow)
 
   const maxRow = row()
@@ -265,8 +249,8 @@ function mountForm(container: HTMLElement, scope: any): () => void {
     advDetails.style.display = specs.length > 0 ? '' : 'none'
     advSummary.textContent = '高级参数（' + provider + '）'
     advInputs = []
-    const snap = scope.getSnapshot()
-    const v = snap.status === 'ready' ? snap.value : undefined
+    const snap = scope?.getSnapshot()
+    const v = snap?.status === 'ready' ? snap.value : undefined
     for (const spec of specs) {
       const rw = row()
       rw.appendChild(label(spec.label))
@@ -302,20 +286,92 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   btnRow.appendChild(resetBtn)
   root.appendChild(btnRow)
 
+  /** 当前供应商的主输入行是否敏感。 */
+  function isSecretInput(provider: string): boolean {
+    return specOf(provider)?.input.secret === true
+  }
+
+  /**
+   * 运行期“这个引擎配好了没有”—— 问插件自己的 REST 路由。
+   *
+   * 不能用 describe 的 secrets 边车：上游把 set 定义成 `value !== undefined`，而 secret 字段
+   * 总有默认空串，边车对每个密钥恒为 true（实测）。也不能靠回显（脱敏后不下发）。
+   * 运行期走的是与真实搜索同一条凭据解析链，是唯一可信的答案。
+   */
+  let engineStatus: Record<string, boolean> = {}
+  let statusFetched = false
+  async function loadEngineStatus(): Promise<void> {
+    try {
+      const res = await fetch('/api/web-search-thirdparty/config')
+      const json: any = await res.json()
+      const engines = (json?.engines ?? {}) as Record<string, { configured?: boolean }>
+      engineStatus = Object.fromEntries(Object.entries(engines).map(([id, v]) => [id, v?.configured === true]))
+      statusFetched = true
+    } catch {
+      statusFetched = false
+    }
+    updateSecretHints(select.value)
+  }
+
+  function updateSecretHints(provider: string): void {
+    const spec = specOf(provider)
+    if (spec === undefined) { keyHint.textContent = ''; cxHint.textContent = ''; return }
+    if (!statusFetched) {
+      // 拿不到运行期状态时只说确定的话，不假装“已保存”
+      keyHint.textContent = spec.input.secret ? '出于安全不回显已存密钥；留空表示不修改' : ''
+      cxHint.textContent = spec.secondInput !== undefined ? '留空表示不修改' : ''
+      return
+    }
+    const configured = spec.input.secret === true
+      ? (engineStatus[spec.id] === true ? '运行期状态：密钥可用 ✓' : '运行期状态：未配置密钥')
+      : ''
+    keyHint.textContent = configured
+    if (spec.secondInput !== undefined) {
+      cxHint.textContent = engineStatus[spec.id] === true ? '运行期状态：可用 ✓' : '运行期状态：未配置'
+    } else {
+      cxHint.textContent = ''
+    }
+  }
+
   function refreshSecretPlaceholder(provider: string): void {
     const spec = specOf(provider)
     const labelText = spec?.input.label ?? 'API Key'
     keyLabel.textContent = labelText
-    keyInput.placeholder = labelText
+    const secret = spec?.input.secret === true
+    const configuredNow = spec !== undefined && engineStatus[spec.id] === true
+    keyInput.placeholder = secret
+      ? (configuredNow ? '已保存（留空表示不修改）' : labelText)
+      : labelText
     const hasCx = spec?.secondInput !== undefined
     cxRow.style.display = hasCx ? 'flex' : 'none'
     cxInput.style.display = hasCx ? '' : 'none'
     if (!hasCx) cxInput.value = ''
+    updateSecretHints(provider)
   }
 
   function syncFromScope(): void {
+    if (scope === undefined) {
+      scopeNotice.style.display = ''
+      scopeNotice.textContent = '⚠ 未找到设置传输服务（configForms / settingsScope）：当前 DSH 版本无法保存本页设置。'
+      saveBtn.disabled = true
+      resetBtn.disabled = true
+      return
+    }
     const snap = scope.getSnapshot()
-    if (snap.status !== 'ready' || snap.value === undefined) return
+    const served = scope.served()
+    if (snap.status !== 'ready' || snap.value === undefined) {
+      scopeNotice.style.display = ''
+      scopeNotice.textContent = served
+        ? '⏳ 正在从宿主读取设置…'
+        : '⚠ 宿主当前没有服务本插件的设置分区：写入会被拒绝。请确认插件已在 profile 的 bundles 中启用，并重启 DSHR Web。'
+      saveBtn.disabled = !served
+      resetBtn.disabled = !served
+      return
+    }
+    scopeNotice.style.display = snap.writable ? 'none' : ''
+    if (!snap.writable) scopeNotice.textContent = '⚠ 当前页面不允许持久化设置（例如非 loopback 访问）：写入不会保存到宿主。'
+    saveBtn.disabled = !snap.writable
+    resetBtn.disabled = !snap.writable
     const v = snap.value
     const provider = v.provider ?? 'searxng'
     select.value = provider
@@ -338,9 +394,10 @@ function mountForm(container: HTMLElement, scope: any): () => void {
     cacheSecInput.value = String(Math.round((v.cacheTtlMs ?? 60000) / 1000))
   }
 
-  const unsubscribe = scope.subscribe(syncFromScope)
+  const unsubscribe = scope?.subscribe(syncFromScope)
   syncFromScope()
-  select.addEventListener('change', () => { refreshSecretPlaceholder(select.value); renderAdv(select.value) })
+  void loadEngineStatus()
+  select.addEventListener('change', () => { refreshSecretPlaceholder(select.value); renderAdv(select.value); void loadEngineStatus() })
 
   testBtn.addEventListener('click', async () => {
     status.textContent = '测试中…'
@@ -370,44 +427,69 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   })
 
   saveBtn.addEventListener('click', async () => {
+    if (scope === undefined) {
+      status.textContent = '❌ 保存失败：未找到设置传输服务'
+      return
+    }
     const provider = select.value
     const spec = specOf(provider)
-    const writes: Array<Promise<void>> = []
-    writes.push(scope.set('provider', provider))
-    if (spec !== undefined) {
-      // 主输入行（key 或 SearXNG 实例 URL）与可选第二输入行（cx）由 spec 驱动
-      const mainVal = keyInput.value.trim()
-      if (mainVal.length > 0) writes.push(scope.set(spec.input.configKey, mainVal))
-      if (spec.secondInput !== undefined) {
-        const cxVal = cxInput.value.trim()
-        if (cxVal.length > 0) writes.push(scope.set(spec.secondInput.configKey, cxVal))
-      }
-    }
-    writes.push(scope.set('maxResults', clampMax(Number(maxInput.value))))
-    writes.push(scope.set('mergeResults', mergeCheck.checked))
-    for (const a of advInputs) {
-      const raw = a.input.value.trim()
-      if (raw === '') continue
-      writes.push(scope.set(a.key, a.numeric ? Number(raw) : raw))
-    }
-    writes.push(scope.set('enableFetchProvider', fetchProviderCheck.checked))
-    writes.push(scope.set('maxPerDomain', clampInt(Number(perDomainInput.value))))
-    writes.push(scope.set('relevanceSort', relevanceCheck.checked))
-    writes.push(scope.set('cacheEnabled', cacheCheck.checked))
-    const cacheSec = clampInt(Number(cacheSecInput.value))
-    writes.push(scope.set('cacheTtlMs', cacheSec > 0 ? Math.max(1000, cacheSec * 1000) : 60000))
+    const { ops, wroteSecret } = buildSaveOps({
+      provider,
+      // 主输入行（key 或 SearXNG 实例 URL）与可选第二输入行（cx）由 spec 驱动。
+      // 敏感字段留空 = 保持宿主里已有的密钥（脱敏后本来就看不到原值，绝不能回写空串把它抹掉）。
+      ...(spec === undefined ? {} : {
+        main: { field: spec.input.configKey, secret: spec.input.secret, value: keyInput.value },
+        ...(spec.secondInput === undefined ? {} : {
+          second: { field: spec.secondInput.configKey, secret: spec.secondInput.secret, value: cxInput.value },
+        }),
+      }),
+      maxResults: maxInput.value,
+      mergeResults: mergeCheck.checked,
+      advanced: advInputs.map((a) => ({ key: a.key, value: a.input.value, numeric: a.numeric })),
+      enableFetchProvider: fetchProviderCheck.checked,
+      maxPerDomain: perDomainInput.value,
+      relevanceSort: relevanceCheck.checked,
+      cacheEnabled: cacheCheck.checked,
+      cacheTtlSeconds: cacheSecInput.value,
+    })
     try {
-      await Promise.all(writes)
-      status.textContent = '✅ 已保存'
+      // 一次原子写入：宿主要么整体接受，要么整体拒绝（失败必须如实报错，不再假装“已保存”）
+      const accepted = await scope.mutate(ops)
+      if (!accepted) {
+        status.textContent = '❌ 保存失败：宿主拒绝了这次写入（分区未启用或字段不可写）。设置未改动。'
+        syncFromScope()
+        return
+      }
+      // 回读一次：宿主接受 ≠ 真的生效，所以要重新问运行期状态
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      if (scope.getSnapshot().status !== 'ready') syncFromScope()
+      await loadEngineStatus()
+      refreshSecretPlaceholder(provider)
+      // 保存成功后清掉输入框是刻意的（敏感值不回显），但必须同时告诉用户“已经存下来了”
       keyInput.value = ''
+      if (wroteSecret && spec !== undefined && engineStatus[spec.id] !== true) {
+        status.textContent = '⚠ 已写入宿主，但运行期仍判定该引擎不可用：请点“测试连接”验证密钥是否有效。'
+      } else {
+        status.textContent = '✅ 已保存' + (wroteSecret ? '（密钥已写入宿主的设置分区）' : '')
+      }
     } catch (error) {
       status.textContent = '❌ 保存失败：' + String(error)
+      syncFromScope()
     }
   })
 
   resetBtn.addEventListener('click', async () => {
+    if (scope === undefined) {
+      status.textContent = '❌ 恢复失败：未找到设置传输服务'
+      return
+    }
     try {
-      await Promise.all(RESET_FIELDS.map((field) => scope.unset(field)))
+      // unset 一件件来：某个字段在旧版 DSH 上不是 volatile 时，不该拖垮其它字段的重置
+      const failed: string[] = []
+      for (const field of RESET_FIELDS) {
+        const ok = await scope.mutate([{ op: 'unset', field }])
+        if (!ok) failed.push(field)
+      }
       select.value = 'searxng'
       keyInput.value = ''
       cxInput.value = ''
@@ -416,11 +498,13 @@ function mountForm(container: HTMLElement, scope: any): () => void {
       refreshSecretPlaceholder('searxng')
       renderAdv('searxng')
       fetchProviderCheck.checked = true
-    perDomainInput.value = '2'
+      perDomainInput.value = '2'
       relevanceCheck.checked = false
       cacheCheck.checked = true
       cacheSecInput.value = '60'
-      status.textContent = '✅ 已恢复默认'
+      syncFromScope()
+      if (failed.length === 0) status.textContent = '✅ 已恢复默认'
+      else status.textContent = '⚠ 已恢复默认，但 ' + failed.slice(0, 5).join('、') + (failed.length > 5 ? ' 等' : '') + ' 未能重置（宿主未接受）'
     } catch (error) {
       status.textContent = '❌ 恢复失败：' + String(error)
     }
@@ -433,24 +517,8 @@ function mountForm(container: HTMLElement, scope: any): () => void {
   }
 }
 
-function clampMax(value: number): number {
-  if (!Number.isFinite(value)) return 8
-  return Math.max(1, Math.min(20, Math.round(value)))
-}
-
-function clampInt(value: number): number {
-  if (!Number.isFinite(value)) return 0
-  const n = Math.round(value)
-  if (n < 0) return 0
-  if (n > 86400) return 86400
-  return n
-}
-
 export function apply(ctx: any): void {
-  const scope = ctx.settingsScope.bind<SettingsShape>({
-    namespace: NAMESPACE,
-    decode: (value: unknown) => (typeof value === 'object' && value !== null ? value as SettingsShape : undefined),
-  })
+  const scope = createScopeAdapter(ctx)
 
   function SettingsSection(): React.ReactElement {
     const ref = React.useRef<HTMLDivElement | null>(null)

@@ -20,7 +20,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { ENGINE_SPECS, getEngineSpec, engineInputs } from './engine-spec.js'
 import type { EngineSpec } from './engine-spec.js'
-import { Config, DEFAULT_SEARXNG_BASE_URL } from './config.js'
+import { Config, DEFAULT_SEARXNG_BASE_URL, CONFIG_FIELDS_VOLATILE, CONFIG_VOLATILE_REQUIRED } from './config.js'
 import type { AppContext, KeySpec, Resolved, SearchProvider, SearchRequest, SearchResult, SearchSource, WebFetchProvider, WebFetchRequest, WebFetchResult } from './types.js'
 import { cleanSnippet, dedupe, dedupeByDomain, normalizePublishedAt, sortByRelevance, toSource } from './text.js'
 import { htmlToMarkdown } from './html.js'
@@ -31,6 +31,7 @@ import {
   runWithConcurrency,
 } from './state.js'
 import { installSettingsSectionCompat } from './settings-compat.js'
+import { unwrapConfig } from './volatile.js'
 
 // 对外重导出：保持历史导出面（第三方按需引用 / 测试引用），实现已迁到独立模块。
 export { Config, DEFAULT_SEARXNG_BASE_URL } from './config.js'
@@ -492,22 +493,48 @@ export function syncKeyAvailable(ctx: AppContext, cfg: Config, id: string): bool
   return true
 }
 
+/**
+ * 凭据相关配置的指纹（由 ENGINE_SPECS 派生，顺序确定）。
+ * 用于在“设置页改过 key”之后让上一轮异步可用性探测结果立刻作废 —— 新版 DSH 的设置写入
+ * 只更新 volatile 引用，不会再触发旧版的 onChange 回调，只能靠读值时自检发现变化。
+ */
+export function credentialFingerprint(cfg: Config): string {
+  const bag = cfg as unknown as Record<string, unknown>
+  const parts: string[] = []
+  for (const spec of ENGINE_SPECS) {
+    parts.push(spec.id)
+    for (const input of engineInputs(spec)) {
+      parts.push(String(bag[input.configKey] ?? ''))
+      if (input.envRefKey !== undefined) parts.push(String(bag[input.envRefKey] ?? ''))
+    }
+  }
+  return parts.join('\u0000')
+}
+
 export class ThirdPartySearchProvider implements SearchProvider {
   readonly id = PROVIDER_ID
   /** 异步探测得到的每源可用性（apply 时与每次配置变更后刷新）。 */
-  private readonly probed = new Map<string, boolean>()
+  private probed = new Map<string, boolean>()
+  /** 上面这份探测结果对应的“凭据指纹”，配置一变立即作废。 */
+  private probedFingerprint = '\u0000none'
   constructor(private readonly resolveOptions: () => Resolved) {}
 
   /** 用与真实搜索同一套凭据解析链刷新各内置源的可用性（供 available() 同步读取）。 */
   async refreshAvailability(): Promise<void> {
     const r = this.resolveOptions()
+    const fingerprint = credentialFingerprint(r.cfg)
+    const probed = new Map<string, boolean>()
     for (const spec of ENGINE_SPECS) {
       try {
-        this.probed.set(spec.id, await builtinKeyAvailable(r.ctx, r.cfg, spec.id))
+        probed.set(spec.id, await builtinKeyAvailable(r.ctx, r.cfg, spec.id))
       } catch {
-        this.probed.delete(spec.id) // 探测失败不算结论，交回同步判断
+        // 探测失败不算结论，交回同步判断
       }
     }
+    // 探测期间配置又变了：这批结果已经过期，丢弃（下一次 available() 会再排一次）
+    if (credentialFingerprint(this.resolveOptions().cfg) !== fingerprint) return
+    this.probed = probed
+    this.probedFingerprint = fingerprint
   }
 
   available(): boolean {
@@ -515,6 +542,16 @@ export class ThirdPartySearchProvider implements SearchProvider {
       const r = this.resolveOptions()
       const registry = r.ctx.get(PROVIDER_SERVICE_ID) as ProviderRegistry | undefined
       if (registry === undefined || !registry.sources.has(r.cfg.provider)) return false
+      const fingerprint = credentialFingerprint(r.cfg)
+      if (fingerprint !== this.probedFingerprint) {
+        // 设置页刚保存（或清空）了某个 key：旧探测结果立刻作废。
+        // 新版 DSH 不会再回调 onChange（设置文档直接改 volatile 引用），所以必须在这里自检，
+        // 否则“保存 key 后主源仍被判为不可用、要重启才生效”。
+        this.probed = new Map()
+        this.probedFingerprint = fingerprint
+        void this.refreshAvailability().catch(() => {})
+        return syncKeyAvailable(r.ctx, r.cfg, r.cfg.provider)
+      }
       const probed = this.probed.get(r.cfg.provider)
       if (probed !== undefined) return probed
       return syncKeyAvailable(r.ctx, r.cfg, r.cfg.provider)
@@ -637,7 +674,9 @@ export class ThirdPartySearchProvider implements SearchProvider {
   }
 }
 function resolveOptions(ctx: AppContext, cfg: Config): Resolved {
-  return { ctx, cfg }
+  // DSH ≥ 0.1.7 的可热更新字段是 volatile 引用（设置页写入后原地更新）：
+  // 每次都重新解包，才能读到设置页刚保存的 key，而不是启动那一刻的旧值。
+  return { ctx, cfg: unwrapConfig(cfg) }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -713,7 +752,8 @@ function registerRoutes(ctx: AppContext, current: () => Config): void {
           return
         }
         const started = Date.now()
-        const r: Resolved = { ctx, cfg: cfgFromTestBody(current(), body) }
+        // current() 可能返回带 volatile 引用的配置：解包后再按表单值覆盖
+        const r: Resolved = { ctx, cfg: cfgFromTestBody(unwrapConfig(current()), body) }
         // 测试表单里的 url 是浏览器侧可控输入：必须过 SSRF 校验，防止宿主被当跳板探测内网
         if (provider === 'searxng' && r.cfg.searxngBaseURL.length > 0) {
           try {
@@ -760,9 +800,35 @@ function registerRoutes(ctx: AppContext, current: () => Config): void {
         }
         sendJson(res, 200, { ok: true, stats: getSearchStats(), circuit: getCircuitStates(), cache: getCacheStats() })
       }
+      /**
+       * GET /api/web-search-thirdparty/config —— 设置页用的“运行期真相”。
+       *
+       * 浏览器侧拿不到 `role('secret')` 字段的原值（宿主脱敏），describe 的 secrets 边车又对每个
+       * 密钥恒为 set=true（上游把 set 定义为 `value !== undefined`，而 secret 字段总有默认空串）。
+       * 所以“这个引擎到底配好了没有”只能问运行期：这里对每个内置引擎跑一遍与真实搜索完全相同的
+       * 凭据解析链（字面量 → credentials 服务 → 启动环境变量）。
+       */
+      const configHandler = async (req: any, res: any): Promise<void> => {
+        const method = req.method ?? ''
+        if (method !== 'GET' && method !== 'HEAD') {
+          sendJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'GET only' } })
+          return
+        }
+        const cfg = unwrapConfig(current())
+        const engines: Record<string, { configured: boolean }> = {}
+        for (const spec of ENGINE_SPECS) {
+          try {
+            engines[spec.id] = { configured: await builtinKeyAvailable(ctx, cfg, spec.id) }
+          } catch {
+            engines[spec.id] = { configured: false }
+          }
+        }
+        sendJson(res, 200, { ok: true, provider: cfg.provider, engines })
+      }
       const disposeTest = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/test', handler })
       const disposeStats = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/stats', handler: statsHandler })
-      return () => { disposeTest?.(); disposeStats?.() }
+      const disposeConfig = webCtx.webServer.register({ kind: 'exact', path: '/api/web-search-thirdparty/config', handler: configHandler })
+      return () => { disposeTest?.(); disposeStats?.(); disposeConfig?.() }
     }, 'web-search-thirdparty: test + stats routes')
   })
 }
@@ -830,8 +896,15 @@ export class LocalFetchProvider implements WebFetchProvider {
 export function apply(ctx: AppContext, config: Config): void {
   let current = () => config
   const searchProvider = new ThirdPartySearchProvider(() => resolveOptions(ctx, current()))
+  // 新版 DSH 靠 volatile 字段把条目暴露给设置页；依赖版本不够时这里必须显式告警，
+  // 否则表现就是“设置页填了 key、点了保存、什么也没发生”，排查成本极高。
+  if (CONFIG_VOLATILE_REQUIRED && !CONFIG_FIELDS_VOLATILE) {
+    ctx.logger?.warn?.('[web-search-thirdparty] 当前 DSH 依赖 volatile 配置字段，但 @deepseek-ai/schemastery 版本过低（< 3.18.3）：设置页将无法保存任何改动。请升级该依赖。')
+  }
   // 卸载 / 热重载时清空缓存、熔断与统计，避免旧一代状态残留到新一代
   ctx.effect(() => () => resetRuntimeState(), 'web-search-thirdparty: runtime state')
+  // A/B 代（≤0.1.6）把分区注册到 settings 服务；C 代（≥0.1.7）由设置文档直接读本条目
+  // 导出的 Config 模式（前提：可编辑字段声明为 volatile），此处是无操作。
   installSettingsSectionCompat(ctx, SETTINGS_NAMESPACE, Config, config, {
     setSource: (source) => { current = source },
     onChange: () => {

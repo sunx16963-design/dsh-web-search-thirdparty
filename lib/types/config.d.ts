@@ -77,4 +77,15 @@ export interface Config {
     googleSearchEngineIdEnv: string;
     googleLanguage: string;
 }
+/**
+ * 构造插件 Config 模式。
+ * @param z - schemastery 模块（参数化以便测试注入真实实现）
+ * @param volatile - 是否把可编辑字段声明为 volatile（DSH ≥ 0.1.7 必须，≤ 0.1.6 必须不）
+ */
+export declare function buildConfigSchema(z: any, volatile: boolean): any;
+/** 运行中的 DSH 代际对应的 Config 模式。 */
 export declare const Config: any;
+/** 是否处于「设置分区由 volatile 字段驱动」的新代际（DSH ≥ 0.1.7-alpha.1）。 */
+export declare const CONFIG_VOLATILE_REQUIRED: boolean;
+/** 解析结果是否已由 volatile 引用驱动（设置页可保存的必要条件）。 */
+export declare const CONFIG_FIELDS_VOLATILE: boolean;

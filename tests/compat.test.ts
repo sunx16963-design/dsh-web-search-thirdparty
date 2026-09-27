@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
 import { createServer, Server } from 'node:http'
 import {
-  ThirdPartySearchProvider, ProviderRegistry, builtinAdapter, syncKeyAvailable,
+  ThirdPartySearchProvider, ProviderRegistry, builtinAdapter, builtinKeyAvailable, syncKeyAvailable,
   PROVIDER_SERVICE_ID, searchSearxng,
 } from '../src/index'
-import { installSettingsSectionCompat } from '../src/settings-compat'
+import { installSettingsSectionCompat, settingsGeneration } from '../src/settings-compat'
 import { getEngineSpec } from '../src/engine-spec'
 import { isPrivateIp, isPrivateName, assertPublicUrl } from '../src/net'
 import { getCacheStats, resetRuntimeState } from '../src/state'
 
-function settingsMock() { return (globalThis as any).__dshSettingsMock as { installSettingsSection?: (...a: any[]) => void } }
+function settingsMock() { return (globalThis as any).__dshSettingsMock as { installSettingsSection?: (...a: any[]) => void; SettingsForms?: unknown } }
 function envMock() { return (globalThis as any).__dshEnvMock as { values: Record<string, string> } }
 
 function cfg(over: any = {}) {
@@ -86,6 +86,21 @@ describe('settings section install (two generations of the DSH settings API)', (
     expect(watched).toHaveLength(1)
     expect(current).toEqual({ b: 2 })
   })
+
+  it('registers nothing on >= 0.1.7 (SettingsForms serves the entry schema itself)', () => {
+    settingsMock().SettingsForms = class {}
+    expect(settingsGeneration()).toBe('forms')
+    const ctx: any = {
+      inject: () => { throw new Error('新代际不该再走注册路径') },
+      logger: { warn: () => { throw new Error('新代际不该再刷“注册失败”告警') } },
+    }
+    // 关键回归：这里过去会硬走 settings.register 兜底 → TypeError → 记一条
+    // “设置分区注册失败，改用组合配置”的误导告警，把真正的根因（缺 volatile）藏起来。
+    installSettingsSectionCompat(ctx, 'ns-new', {}, { c: 3 }, { setSource: () => {}, onChange: () => {} })
+    expect(settingsGeneration()).toBe('forms')
+    settingsMock().SettingsForms = undefined
+    expect(settingsGeneration()).toBe('section')
+  })
 })
 
 describe('provider availability', () => {
@@ -105,6 +120,18 @@ describe('provider availability', () => {
     const ctx: any = { get: () => undefined, web: {} }
     expect(syncKeyAvailable(ctx, cfg({ provider: 'tavily' }) as any, 'tavily')).toBe(true)
     delete envMock().values.TAVILY_API_KEY
+  })
+
+  it('运行期引擎状态（/config 路由的数据源）“配好没有”与真实搜索同链', async () => {
+    const ctx: any = { get: () => undefined, web: {} }
+    // 无 key 的引擎恒可用；带 key 的引擎没有来源即为未配置
+    expect(await builtinKeyAvailable(ctx, cfg({ provider: 'searxng' }) as any, 'searxng')).toBe(true)
+    expect(await builtinKeyAvailable(ctx, cfg({ provider: 'tavily' }) as any, 'tavily')).toBe(false)
+    // 设置页写进去的字面量（volatile 解包后）立即被认到
+    expect(await builtinKeyAvailable(ctx, cfg({ provider: 'tavily', tavilyApiKey: 'tvly-x' }) as any, 'tavily')).toBe(true)
+    // credentials 服务里的 key 也算已配置
+    const withCreds: any = { get: (n: string) => (n === 'credentials' ? { resolve: async () => ({ value: 'from-store' }) } : undefined), web: {} }
+    expect(await builtinKeyAvailable(withCreds, cfg({ provider: 'tavily' }) as any, 'tavily')).toBe(true)
   })
 
   it('probes asynchronously and reports the probed result through available()', async () => {

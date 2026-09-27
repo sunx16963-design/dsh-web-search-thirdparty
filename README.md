@@ -11,7 +11,27 @@
 
 ## 版本与兼容
 
-支持 DSH 最新版，并自动兼容旧版设置 API（`0.1.0-rc.6` 起）。
+支持 DSH 最新版，并自动兼容旧版设置 API（`0.1.0-rc.6` 起）：
+
+| DSH 设置服务 | 代际特征 | 本插件的走法 |
+| --- | --- | --- |
+| ≥ `0.1.7-alpha.1` | `dsh-settings` 导出 `SettingsForms`；设置文档按 **profile 条目 id** 自动服务该条目的 `Config`，且只投影 `.volatile()` 字段 | Config 每个可编辑字段声明 `.volatile()`；客户端走 `ctx.configForms.get('web-search-thirdparty')`；分区名 = 组合条目 id |
+| `0.1.2` ~ `0.1.6-alpha.2` | 导出 `SettingsProvider`，有 `installSection` | Config **不**声明 volatile；客户端走 `ctx.settingsScope.bind({ namespace: 'dsh-web-search-thirdparty' })` |
+| ≤ `0.1.1-rc.2` | 顶层 helper `installSettingsSection` | 同上一行，注册走 helper |
+
+代际在运行期探测（`settingsGeneration()`），两条路都受测试保护。**注意**：如果你的 DSH 是
+≥ 0.1.7 而 `@deepseek-ai/schemastery` 低于 `3.18.3`（`.volatile()` 从 3.18.3 才提供），
+插件会在日志里给出明确告警，设置页将无法保存。
+
+### 排查：设置页保存后 key 像是“被清空”了
+
+先看设置页输入框下方的**运行期状态**（由 `GET /api/web-search-thirdparty/config` 提供）：
+
+- 显示“运行期状态：密钥可用 ✓” —— 保存成功，可以正常搜索。密钥出于安全**不回显**，
+  输入框清空是刻意行为，留空即为“保持现状”。
+- 显示“未配置” —— 密钥没有写进宿主。按顺序检查：日志里有没有
+  `schemastery 版本过低` 告警；插件是否真的在 profile 的 `dsh.profile.bundles` 里；
+  是否按提示重启过 `dsh web`。
 
 ## 系统要求
 
@@ -44,6 +64,8 @@ provider，从而把 `web_search` 与 `web_fetch` 一起打开。全部在设置
 - 开放 provider 注册 API，其它插件可挂载自己的搜索源。
 - 每源熔断与用量统计（设置页“用量统计”面板可查看各源请求/错误/延迟、缓存命中与熔断状态，
   也有 `GET /api/web-search-thirdparty/stats` 接口）。
+- 运行期配置自检：`GET /api/web-search-thirdparty/config` 逐引擎回报“配好了没有”
+  （走与真实搜索相同的凭据解析链），设置页用它显示运行期状态。
 
 ## 支持的引擎
 
@@ -125,10 +147,13 @@ dshpm install github:sunx16963-design/dsh-web-search-thirdparty --profile web \
 
 ## 配置
 
-设置存放在 `dsh-web-search-thirdparty` 分区下：
+设置页写入的字段落在**当前 profile 的 patch 文档**里，分区名随 DSH 代际而不同：
+
+- DSH ≥ 0.1.7：分区名 = 组合条目 id，即 `web-search-thirdparty`（`cordis.patch.yml` 里 insert 的 id）。
+- DSH ≤ 0.1.6：分区名 = 本插件注册的 namespace，即 `dsh-web-search-thirdparty`（写到 `settings.yaml`）。
 
 ```yaml
-dsh-web-search-thirdparty:
+web-search-thirdparty:          # ≤0.1.6 上是 dsh-web-search-thirdparty
   provider: searxng
   searxngBaseURL: https://searx.be   # 或自建实例
   maxResults: 8
@@ -144,6 +169,9 @@ dsh-web-search-thirdparty:
   # （同时需要删掉本插件 bundle patch 里的 `fetchProvider` 行）。
   enableFetchProvider: true
 ```
+
+> 在 DSH ≥ 0.1.7 上，配置字段在 schema 里都是 `volatile()`：设置页写入后**无需重启**，
+> 插件下一次搜索就会用新值。
 
 ### 只在配置文件里生效的项
 

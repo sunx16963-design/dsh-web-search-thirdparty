@@ -15,6 +15,8 @@ vi.mock('@deepseek-ai/schemastery', () => {
     o.max = () => o
     o.step = () => o
     o.role = () => o
+    // schemastery ≥ 3.18.3 才有这个方法；DSH ≥ 0.1.7 的设置页靠它标记可编辑字段
+    o.volatile = () => o
     return o
   }
   return { default: { object: () => ({}), string: () => chain(), number: () => chain(), boolean: () => chain(), array: () => ({ default: () => chain() }) } }
@@ -48,15 +50,19 @@ vi.mock('@deepseek-ai/dsh-web', () => {
 })
 
 /**
- * 两代 settings API 的开关：默认未定义 installSettingsSection（= 新版 DSH，走服务方法），
- * 测试可把它设成函数以模拟 ≤ 0.1.1-rc.2 的顶层 helper。
+ * settings API 代际开关：
+ * - `SettingsForms` 存在 = DSH ≥ 0.1.7-alpha.1（分区由条目 Config 的 volatile 字段自动服务）；
+ * - 否则看 `installSettingsSection`（≤ 0.1.1-rc.2 的顶层 helper）或服务方法
+ *   `settings.installSection`（0.1.2 ~ 0.1.6）。
+ * 默认两代标记都不设 = 模拟 0.1.2 ~ 0.1.6 的服务方法路径。
  */
 vi.mock('@deepseek-ai/dsh-settings', () => {
-  const state: { installSettingsSection?: (...args: any[]) => void } = {}
+  const state: { installSettingsSection?: (...args: any[]) => void; SettingsForms?: unknown } = {}
   ;(globalThis as any).__dshSettingsMock = state
   return {
     // getter：让 `import * as ns` 的每次访问都读到最新开关
     get installSettingsSection() { return state.installSettingsSection },
+    get SettingsForms() { return state.SettingsForms },
   }
 })
 

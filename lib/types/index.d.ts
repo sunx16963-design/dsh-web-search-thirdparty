@@ -91,11 +91,19 @@ export declare function buildProviderChain(cfg: Config, registry: ProviderRegist
  * 同步没看到时保持乐观（true），由 refreshAvailability() 的探测结果修正。
  */
 export declare function syncKeyAvailable(ctx: AppContext, cfg: Config, id: string): boolean;
+/**
+ * 凭据相关配置的指纹（由 ENGINE_SPECS 派生，顺序确定）。
+ * 用于在“设置页改过 key”之后让上一轮异步可用性探测结果立刻作废 —— 新版 DSH 的设置写入
+ * 只更新 volatile 引用，不会再触发旧版的 onChange 回调，只能靠读值时自检发现变化。
+ */
+export declare function credentialFingerprint(cfg: Config): string;
 export declare class ThirdPartySearchProvider implements SearchProvider {
     private readonly resolveOptions;
     readonly id = "web-search-thirdparty";
     /** 异步探测得到的每源可用性（apply 时与每次配置变更后刷新）。 */
-    private readonly probed;
+    private probed;
+    /** 上面这份探测结果对应的“凭据指纹”，配置一变立即作废。 */
+    private probedFingerprint;
     constructor(resolveOptions: () => Resolved);
     /** 用与真实搜索同一套凭据解析链刷新各内置源的可用性（供 available() 同步读取）。 */
     refreshAvailability(): Promise<void>;

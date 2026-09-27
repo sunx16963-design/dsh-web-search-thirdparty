@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.4.1] - 2026-09-27
+
+修复「设置页填入 Tavily key → 点保存 → key 被清空」：根因是 DSH 0.1.7 换了设置服务，
+而本插件仍按旧一代 API 写配置，于是写入**从未落盘**，界面还无条件显示“✅ 已保存”。
+
+### Fixed（本次报障）
+- **保存 API key 无效 / 保存后 key “消失”**。DSH ≥ 0.1.7-alpha.1 的设置服务换成
+  `dsh-settings` 的 `SettingsForms`：它按 profile 组合条目的 **id** 自动服务该条目导出的
+  `Config` 模式，并且**只把 schema 上声明为 `.volatile()` 的字段**投影成表单
+  （`volatileForm()` 对一个 volatile 字段都没有的条目直接返回 `undefined`，该条目对设置页
+  等于不存在）。本插件此前没有任何字段是 volatile，因此：
+  - 分区从不进入 `settings.describe()`，`ctx.remote.settings.mutate()` 一律被拒；
+  - 客户端 `inject = ['slots', 'settingsScope']` 里的 `settingsScope` 在新版已被删除，
+    设置分区连注册都轮不到。
+  现在 `Config` 的每个可编辑字段都声明 `.volatile()`（旧代际自动降级为普通字段，见下），
+  读写统一走 `unwrapConfig()` 解包 volatile 引用。
+- **保存失败不再假装成功**。旧代码 `await Promise.all(writes)` 后无条件打印“✅ 已保存”并清空
+  输入框；旧代际的设置客户端在被拒时是**静默回读**，因此用户看到的就是“点保存 → key 被清空”。
+  现在改为一次原子 `mutate`，并如实检查返回值：拒绝就报“❌ 保存失败……设置未改动”。
+- **敏感字段不再被空串回写抹掉**。key 被宿主脱敏后浏览器拿不到原值，`buildSaveOps()` 保证
+  空白输入**不产生任何写入 op**（此前是“留空跳过”，但没有测试锁住；现在有）。
+- **保存后不再需要重启才生效**。新版设置写入只更新 volatile 引用，不会再触发旧版的
+  `onChange`，可用性探测缓存因此一直停留在“没有 key”。`ThirdPartySearchProvider` 现在按
+  凭据指纹自检，配置一变立刻作废旧探测结果。
+
+### Added
+- **`GET /api/web-search-thirdparty/config`**：设置页用的“运行期真相”，逐引擎回报是否可用
+  （走与真实搜索完全相同的凭据解析链：字面量 → credentials 服务 → 启动环境变量）。
+  之所以必须新增它：`describe()` 的 `secrets` 边车对每个密钥**恒为** `set: true`
+  （上游定义为 `value !== undefined`，而 secret 字段总有默认空串），浏览器侧根本无法自证
+  “密钥存下来了没有”。设置页现在用它显示“运行期状态：密钥可用 ✓ / 未配置”，并在保存后
+  回读；宿主接受但运行期仍不可用时给出明确告警。
+- 设置页在宿主动拒绝写入或未服务该分区时，直接禁用按钮并说明原因，不再给出可点击的假象。
+
+### Compatibility
+- **支持 DSH ≥ 0.1.7-alpha.1 的新设置 API**，同时保留 ≤ 0.1.6-alpha.2 的旧路径：
+  - 新代际（`dsh-settings` 导出 `SettingsForms`）：Config 声明 volatile；客户端走
+    `ctx.configForms.get(<条目 id>)`（分区即组合条目 id `web-search-thirdparty`）。
+  - 旧代际（导出 `SettingsProvider`）：Config **不**声明 volatile（旧 describe 不拆引用，
+    声明了会被 JSON 成 `{}`）；客户端走 `ctx.settingsScope.bind({ namespace })`。
+  - 代际探测放在 `settingsGeneration()`，`buildConfigSchema(z, volatile)` 参数化以便双向加哨兵。
+- 客户端 `inject` 收窄为 `['slots']`：`settingsScope` 在新版不存在，写成硬依赖会让整个
+  客户端插件永远等不到服务。
+- 依赖 `@deepseek-ai/schemastery` 提升到 `^3.18.3`（`.volatile()` 从 3.18.3 才提供；
+  3.18.1/3.18.2 上会静默退化，届时 `apply()` 会打出可操作的告警而不是让用户面对“保存没反应”）。
+
+### Tests
+- 测试 69 → 99：新增 `tests/settings-volatile.test.ts`（用真实 schemastery/cosmokit 复刻上游
+  `volatileForm()` 投影规则，锁死“无 volatile 字段 ⇒ 分区被跳过”这一根因）与
+  `tests/client-scope.test.ts`（两代适配器、拒绝必须为 false、`buildSaveOps` 空白不回写）。
+
+### Verification（本次修复的实测证据）
+- 隔离 profile 上跑了真实 DSH 0.1.7-alpha.2 + 真实 `SettingsForms`：
+  - 修复前：`describe()` 里**没有** `web-search-thirdparty` → 写入必被拒（bug 形态复现）。
+  - 修复后：分区上线（51 个字段，含 `tavilyApiKey`）；`mutate` 被接受并落盘到
+    profile patch；重启后 key 仍在且真实 Tavily 搜索可用；`/config` 如实回报
+    `tavily.configured=true`、其余 keyed 引擎 false。
+
+### 相关同类问题（调研结论）
+同一代 API 变更还打断了生态里其它第三方插件，说明这不是本插件独有的坑：
+- `@gausszhou/dsh-web-search-local@0.2.1` 直接 `import { installSettingsSection } from
+  '@deepseek-ai/dsh-settings'` —— 该导出在 0.1.7 已删除，ESM 在**链接期**就抛
+  `SyntaxError: does not provide an export named 'installSettingsSection'`，插件完全加载不了
+  （本插件 0.4.0 用 namespace import + 运行期探测避开了这一枪，但没跟上 volatile 约定）。
+- `@dsh-plugin/dsh-auxiliary@0.6.4` 调 `loader.settings.installSection(...)` —— 0.1.7 没有该方法。
+- `dsh-graph@0.16.1` 仍只认 `ctx.settingsScope`（0 处 `configForms`），其自带文案就是
+  “settingsScope 缺失时整页降级”。
+- `dsh-context@0.57.0` 已经同时挂 `settingsScope` 与 `configForms` 两条路 —— 与本次修复同思路。
+- 上游包本身可作为代际判据：`dsh-settings` 0.1.3-alpha.2 / 0.1.5-rc.3 / 0.1.6-alpha.2 导出
+  `SettingsProvider`；0.1.7-alpha.1 起改为导出 `SettingsForms`。
+
 ## [0.4.0] - 2026-09-19
 
 支持最新 DSH（0.1.5-rc.2）并修复一批长期问题。
