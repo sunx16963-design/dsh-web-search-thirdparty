@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.4.4] - 2026-09-27
+
+修复“设置页一直显示**未找到设置传输服务**、无法保存”。
+
+### 根因：只在 `apply()` 里探测一次设置服务
+DSH 客户端 boot 是**并发激活条目**的（`dsh-client-modules` 的 `entries.start()` 对所有插件
+`Promise.all(create)`）。本插件只依赖 `slots`，因此经常在**设置服务提供者之前**激活 ——
+`configForms` 自己还要等 `remote`/`remote.settings`，而 `remote` 的提供者
+（`@deepseek-ai/dsh-api-remotes`）与本插件同批。实测：
+
+```
+apply() 时刻 ctx.get('configForms') = undefined（服务还没注册）
+服务晚到之后 ctx.get('configForms') = 拿到服务 ✅
+```
+
+一次性探测把「服务还没来」永久误判成「当前 DSH 版本无法保存」，页面就卡在提示上。
+
+### Fixed
+- `src/client/scope.ts`：`createScopeAdapter()` 改为**可自愈的动态适配器** —— 外层适配器恒定存在
+  （设置页订阅的稳定对象），内层实现用 `ctx.inject([name], cb)` 订阅服务出现/就绪并在回调里
+  用**已注入该服务的子 ctx**构建（对该 ctx 连属性访问都合法）；服务晚到时重建并通知 UI，
+  页面自动从“等待服务”恢复为可保存。`ctx.inject` 不存在的老环境退化为一次性探测。
+  构建失败一律吞成“不可用”，绝不让探测错误外溢成插件加载失败。
+- `src/client/index.ts`：提示隐藏时把文本一并清空（隐藏的过期文案会误导读屏软件），
+  并把文案改为“正在等待宿主的设置服务就绪…”，等待期间保存/重置按钮保持禁用。
+
+### Added
+- `tests/client-ui.test.ts`（jsdom，真实产物 + 真实 DOM）：**UI 级**回归 ——
+  服务晚到 → 先提示等待且禁用保存 → 服务到达 → 提示消失、保存解锁、值回填；
+  以及“服务一开始就绪”“旧代际 settingsScope”“两代都缺席”三种对照。
+- `tests/client-activation.test.ts` + `tests/client-scope.test.ts`：用**真实 cordis**
+  覆盖“本插件先激活、configForms 后到”的时序，断言适配器自愈且订阅者被通知。
+
+### 兼容性（安卓版 DSHA 与官方 DSH 同源）
+- 宿主：≥0.1.7 走 `SettingsForms`+volatile；≤0.1.6 走 `SettingsProvider`+`installSection`。
+- 客户端：≥0.1.7 走 `configForms`；≤0.1.6 走 `settingsScope`。两代都按**可选服务**动态探测，
+  任一服务缺席都不会让插件加载失败，晚到也能自愈。
+
+### 验证
+- 测试 112 → 122，typecheck（宿主 + 客户端）/ build 通过；
+- 隔离实例上对**服务器实际下发**的客户端产物做真实 cordis 激活检查：ACTIVE 且注册
+  `settings.section`。
+
 ## [0.4.3] - 2026-09-27
 
 **真正的病根**：`apply()` 访问了没有 `inject` 声明的服务属性，cordis 直接抛错 →

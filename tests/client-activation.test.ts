@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from 'vitest'
 // tests/platform-mocks.ts 把 @deepseek-ai/cordis 换成了只有 Service 的垫片；
 // 本文件必须用**真实** cordis（激活语义就是这个文件要验证的东西）。
 const { Context, Service } = await vi.importActual<any>('@deepseek-ai/cordis')
+const { createScopeAdapter } = await import('../src/client/scope.js')
 
 /** cordis FiberState：ACTIVE=2、FAILED=3（与 dsh-client-modules 里的镜像常量一致）。 */
 const ACTIVE = 2
@@ -57,12 +58,30 @@ class SlotsStub extends Service {
   }
 }
 
+/**
+ * `configForms` 的替身：必须和真实实现一样「describe 报告被服务的分区 + get(id) 返回表单」，
+ * 否则适配器会因为拿不到表单而停在 unavailable（这正是第一次测试替身写错时踩到的坑）。
+ */
 class ConfigFormsStub extends Service {
   constructor(ctx: any) { super(ctx, 'configForms') }
   describe(): any {
-    return { getSnapshot: () => ({ view: { writable: true, namespaces: [] } }), subscribe: () => () => {} }
+    return {
+      getSnapshot: () => ({
+        view: {
+          writable: true,
+          namespaces: [{ ns: 'web-search-thirdparty', revision: 0, value: { provider: 'tavily' }, secrets: [] }],
+        },
+      }),
+      subscribe: () => () => {},
+    }
   }
-  get(_entryId: string): any { return undefined }
+  get(_entryId: string): any {
+    return {
+      getSnapshot: () => ({ status: 'ready', value: { provider: 'tavily' }, writable: true, revision: 0 }),
+      subscribe: () => () => {},
+      mutate: async () => true,
+    }
+  }
 }
 
 class SettingsScopeStub extends Service {
@@ -154,6 +173,44 @@ describe('根因锚点：cordis 的属性访问会强制 inject', () => {
     })
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(seen).toEqual(['present=true', 'absent=true'])
+    await app.stop?.()
+  })
+})
+
+describe('真实 cordis：设置服务晚到时必须自愈（本次线上故障）', () => {
+  it('本插件先激活、configForms 后到 → 适配器自动从 unavailable 变为 ready', async () => {
+    const app = new Context()
+    app.plugin(SlotsStub) // 本插件只依赖 slots，所以会先激活
+    let pluginCtx: any
+    app.plugin({ name: 'ctx-capture', inject: ['slots'], apply(ctx: any) { pluginCtx = ctx } })
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(pluginCtx).toBeDefined()
+
+    // 此刻设置服务还没注册（真实 boot 里 configForms 还要等 remote，而 remote 与本插件同批）
+    const adapter = createScopeAdapter(pluginCtx)
+    expect(adapter.getSnapshot().status).toBe('unavailable')
+    const notified: number[] = []
+    adapter.subscribe(() => notified.push(1))
+
+    // 设置服务晚到
+    app.plugin(ConfigFormsStub)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    expect(adapter.getSnapshot().status).not.toBe('unavailable')
+    expect(notified.length).toBeGreaterThan(0) // UI 必须被通知去重渲染
+    await app.stop?.()
+  })
+
+  it('控制组：服务先就绪时，apply 后立刻可用（不需要等待）', async () => {
+    const app = new Context()
+    app.plugin(SlotsStub)
+    app.plugin(ConfigFormsStub)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    let pluginCtx: any
+    app.plugin({ name: 'ctx-capture-2', inject: ['slots'], apply(ctx: any) { pluginCtx = ctx } })
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const adapter = createScopeAdapter(pluginCtx)
+    expect(adapter.getSnapshot().status).not.toBe('unavailable')
     await app.stop?.()
   })
 })

@@ -198,9 +198,98 @@ export function createLegacyAdapter(ctx: any): SettingsScopeAdapter | undefined 
   }
 }
 
-/** 优先 C 代，其次 A/B 代；两代服务都不在时返回 undefined（UI 明示无法保存）。 */
-export function createScopeAdapter(ctx: any): SettingsScopeAdapter | undefined {
-  return createFormsAdapter(ctx) ?? createLegacyAdapter(ctx)
+/**
+ * 组合出一个**可自愈**的设置传输适配器。
+ *
+ * ⚠ 不能只在 `apply()` 里探测一次。DSH 客户端 boot 是**并发激活条目**的
+ * （`dsh-client-modules` 的 `entries.start()` 对所有插件 `Promise.all(create)`），而本插件
+ * 只依赖 `slots`，因此经常在设置服务提供者**之前**激活 —— 设置服务 `configForms` 自己还要等
+ * `remote`/`remote.settings`，而 `remote` 的提供者与本插件同批。一次性探测会把「服务还没来」
+ * 永久误判成「当前 DSH 版本无法保存」，页面就一直显示“未找到设置传输服务”。
+ *
+ * 这里用 `ctx.inject([name], cb)` 订阅：服务已可用时回调立刻执行，服务晚到时再执行；
+ * 回调收到的是**已注入该服务的子 ctx**（对它连属性访问都合法）。每次回调都重建适配器并
+ * 通知订阅者（设置页据此重新渲染、自动从“不可保存”恢复为可用）。
+ *
+ * `ctx.inject` 不存在时（非常老的环境）退化为一次性探测，行为与以前一致。
+ *
+ * @param ctx - 客户端插件上下文
+ * @returns 始终返回一个适配器；宿主服务缺席时其快照为 `unavailable`
+ */
+export function createScopeAdapter(ctx: any): SettingsScopeAdapter {
+  let inner: SettingsScopeAdapter | undefined
+  let innerOff: (() => void) | undefined
+  let innerKind: 'forms' | 'legacy' | undefined
+  const listeners = new Set<() => void>()
+  const emit = (): void => { for (const listener of [...listeners]) listener() }
+
+  /** 装上一个实现；已经有更优/同代实现时不重复安装，避免多余订阅。 */
+  const install = (kind: 'forms' | 'legacy', adapter: SettingsScopeAdapter | undefined): void => {
+    if (adapter === undefined) return
+    if (innerKind === 'forms') return // C 代是最优解，不再降级
+    if (inner !== undefined && innerKind === kind) return
+    innerOff?.()
+    innerOff = undefined
+    inner = adapter
+    innerKind = kind
+    innerOff = adapter.subscribe(() => emit())
+    emit()
+  }
+
+  /**
+   * 构建失败绝不允许外溢：设置传输层探测失败只应表现为「不可用」，不能让 apply() 抛错
+   * （那会让整个客户端插件 FAILED、启动页报 Failed to load plugin）。
+   */
+  const safeBuild = (
+    build: (serviceCtx: any) => SettingsScopeAdapter | undefined,
+    serviceCtx: any,
+  ): SettingsScopeAdapter | undefined => {
+    try {
+      return build(serviceCtx)
+    } catch {
+      return undefined
+    }
+  }
+
+  const probe = (): void => {
+    if (inner !== undefined) return
+    install('forms', safeBuild(createFormsAdapter, ctx))
+    if (inner === undefined) install('legacy', safeBuild(createLegacyAdapter, ctx))
+  }
+
+  probe() // 先按当前状态试一次：服务若已就绪，页面首帧就是可用状态
+
+  const watch = (
+    name: string,
+    kind: 'forms' | 'legacy',
+    build: (serviceCtx: any) => SettingsScopeAdapter | undefined,
+  ): void => {
+    try {
+      const dispose = ctx?.inject?.([name], (serviceCtx: any) => { install(kind, safeBuild(build, serviceCtx)) })
+      if (typeof dispose === 'function') {
+        // 订阅随插件释放（ctx.inject 通常已挂在调用方 fiber 上，这里再兜一层）
+        ctx?.effect?.(() => dispose)
+      }
+    } catch {
+      /* 该环境不支持 ctx.inject：只用上面的 probe() 结果 */
+    }
+  }
+  watch('configForms', 'forms', createFormsAdapter)
+  watch('settingsScope', 'legacy', createLegacyAdapter)
+
+  return {
+    served: () => inner?.served() === true,
+    getSnapshot: () => inner?.getSnapshot() ?? { status: 'unavailable', writable: false },
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    mutate: async (ops) => {
+      const adapter = inner
+      if (adapter === undefined) return false
+      return adapter.mutate(ops)
+    },
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

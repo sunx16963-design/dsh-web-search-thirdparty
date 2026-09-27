@@ -54,10 +54,23 @@ function fakeForms(opts: {
  * 直接属性访问（ctx.configForms）会抛错，不能用来做跨代探测。
  */
 function ctxWith(services: Record<string, any>) {
-  return {
+  const watchers: Array<{ names: string[]; callback: (ctx: any) => void }> = []
+  const ctx: any = {
     get: (name: string) => services[name],
+    inject: (names: string[], callback: (ctx: any) => void) => {
+      watchers.push({ names, callback })
+      // cordis 语义：服务已在 → 回调立即执行
+      for (const name of names) if (services[name] !== undefined) callback(ctx)
+      return () => {}
+    },
     effect: (_fn: any) => () => {},
+    /** 测试专用：模拟「服务晚到」并触发已注册的 inject 回调。 */
+    __arrive: (name: string, service: any) => {
+      services[name] = service
+      for (const watcher of watchers) if (watcher.names.includes(name)) watcher.callback(ctx)
+    },
   }
+  return ctx
 }
 
 describe('createScopeAdapter', () => {
@@ -69,8 +82,13 @@ describe('createScopeAdapter', () => {
     expect(adapter!.served()).toBe(true)
   })
 
-  it('两代服务都不在时返回 undefined（UI 据此禁用保存并说明原因）', () => {
-    expect(createScopeAdapter(ctxWith({}))).toBeUndefined()
+  it('两代服务都不在时：外层适配器仍存在但快照为 unavailable（UI 据此禁用保存并说明原因）', () => {
+    // 外层适配器必须「永远存在」：它是页面订阅的稳定对象，服务晚到时靠它通知 UI 自愈。
+    const adapter = createScopeAdapter(ctxWith({}))
+    expect(adapter.getSnapshot().status).toBe('unavailable')
+    expect(adapter.getSnapshot().writable).toBe(false)
+    expect(adapter.served()).toBe(false)
+    // 两个具体实现仍在服务不可用时返回 undefined
     expect(createFormsAdapter(ctxWith({ configForms: {} }))).toBeUndefined()
     expect(createLegacyAdapter(ctxWith({ settingsScope: {} }))).toBeUndefined()
   })
@@ -144,6 +162,62 @@ describe('C 代（≥ 0.1.7）适配器', () => {
   it('非 loopback 页面（writable=false）会被如实透出', () => {
     const { ctx } = fakeForms({ writable: false })
     expect(createFormsAdapter(ctx)!.getSnapshot().writable).toBe(false)
+  })
+})
+
+describe('服务晚到时的自愈（真实故障：设置服务晚于本插件激活）', () => {
+  it('configForms 在 createScopeAdapter 之后才出现 → 适配器必须自动恢复', () => {
+    const ctx: any = ctxWith({})            // 此刻连 slots 都没有，只有 ctx 本身
+    const adapter = createScopeAdapter(ctx)
+    expect(adapter.getSnapshot().status).toBe('unavailable')
+
+    const armed: string[] = []
+    adapter.subscribe(() => armed.push('changed'))
+
+    const { service } = fakeForms()
+    ctx.__arrive('configForms', service)      // 设置服务晚到
+
+    expect(armed.length).toBeGreaterThan(0)   // 必须通知 UI 重渲染
+    expect(adapter.getSnapshot().status).toBe('ready')
+  })
+
+  it('settingsScope 晚到（旧代际）同样要恢复', () => {
+    const ctx: any = ctxWith({})
+    const adapter = createScopeAdapter(ctx)
+    expect(adapter.served()).toBe(false)
+    ctx.__arrive('settingsScope', {
+      bind: () => ({
+        getSnapshot: () => ({ status: 'ready', value: { provider: 'tavily' }, writable: true, revision: 1 }),
+        subscribe: () => () => {},
+        set: async () => {},
+        unset: async () => {},
+      }),
+    })
+    expect(adapter.getSnapshot().status).toBe('ready')
+    expect(adapter.served()).toBe(true)
+  })
+
+  it('两代同时出现时优先用 C 代 configForms', () => {
+    const ctx: any = ctxWith({})
+    const adapter = createScopeAdapter(ctx)
+    const { service } = fakeForms()
+    ctx.__arrive('settingsScope', { bind: () => { throw new Error('不该走旧路径') } })
+    ctx.__arrive('configForms', service)
+    expect(adapter.getSnapshot().status).toBe('ready')
+  })
+
+  it('ctx.inject 不存在的很老环境：退化为一次性探测（服务已在就能用）', () => {
+    const { service } = fakeForms()
+    const bare: any = { get: (name: string) => (name === 'configForms' ? service : undefined) }
+    const adapter = createScopeAdapter(bare)
+    expect(adapter.getSnapshot().status).toBe('ready')
+  })
+
+  it('服务始终不出现时保持 unavailable，且 mutate 返回 false（UI 据此禁用保存）', async () => {
+    const adapter = createScopeAdapter(ctxWith({}))
+    expect(adapter.getSnapshot().status).toBe('unavailable')
+    await expect(adapter.mutate([{ op: 'set', field: 'provider', value: 'tavily' }])).resolves.toBe(false)
+    expect(adapter.served()).toBe(false)
   })
 })
 

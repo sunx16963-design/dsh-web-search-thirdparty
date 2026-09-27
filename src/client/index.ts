@@ -389,7 +389,7 @@ function mountForm(container: HTMLElement, scope: SettingsScopeAdapter | undefin
   function syncFromScope(): void {
     if (scope === undefined) {
       scopeNotice.style.display = ''
-      scopeNotice.textContent = '⚠ 未找到设置传输服务（configForms / settingsScope）：当前 DSH 版本无法保存本页设置。'
+      scopeNotice.textContent = '⏳ 正在等待宿主的设置服务就绪（configForms / settingsScope）… 就绪后本页会自动恢复为可保存。'
       saveBtn.disabled = true
       resetBtn.disabled = true
       return
@@ -400,13 +400,19 @@ function mountForm(container: HTMLElement, scope: SettingsScopeAdapter | undefin
       scopeNotice.style.display = ''
       scopeNotice.textContent = served
         ? '⏳ 正在从宿主读取设置…'
-        : '⚠ 宿主当前没有服务本插件的设置分区：写入会被拒绝。请确认插件已在 profile 的 bundles 中启用，并重启 DSHR Web。'
+        : '⏳ 正在等待宿主的设置服务就绪… 若长时间停留在此，请确认插件已在 profile 的 bundles 中启用，并重启一次 DSHR Web。'
       saveBtn.disabled = !served
       resetBtn.disabled = !served
       return
     }
-    scopeNotice.style.display = snap.writable ? 'none' : ''
-    if (!snap.writable) scopeNotice.textContent = '⚠ 当前页面不允许持久化设置（例如非 loopback 访问）：写入不会保存到宿主。'
+    // 提示隐藏时把文本一并清掉：留着隐藏的过期文案会误导读屏软件，也让“是否已恢复”无法从 DOM 判断
+    if (snap.writable) {
+      scopeNotice.style.display = 'none'
+      scopeNotice.textContent = ''
+    } else {
+      scopeNotice.style.display = ''
+      scopeNotice.textContent = '⚠ 当前页面不允许持久化设置（例如非 loopback 访问）：写入不会保存到宿主。'
+    }
     saveBtn.disabled = !snap.writable
     resetBtn.disabled = !snap.writable
     const v = snap.value

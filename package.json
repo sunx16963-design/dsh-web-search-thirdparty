@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-thirdparty",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "DSH web search provider facade: routes ctx.web.search to third-party engines (SearXNG/Tavily/Serper/Brave/Bing/Google CSE) and provides a web_fetch provider. Replaces the built-in DeepSeek-only search with configurable third-party APIs.",
   "type": "module",
   "main": "./lib/index.js",
@@ -56,6 +56,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-alpha.2",
     "@types/node": "^24.13.3",
     "@types/react": "^18.3.0",
+    "jsdom": "^30.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tsdown": "^0.22.14",
