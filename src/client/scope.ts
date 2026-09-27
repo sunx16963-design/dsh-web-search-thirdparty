@@ -70,14 +70,39 @@ export interface SettingsScopeAdapter {
   mutate(ops: ConfigOp[]): Promise<boolean>
 }
 
+/**
+ * 探测一个**可选**服务。
+ *
+ * cordis 对 `ctx.<service>` 的属性访问会强制 inject 检查并抛错，所以跨代兼容的插件
+ * 只能用 `ctx.get()`。这里再兜一层 try/catch：任何意料之外的抛错都退化为「服务不可用」，
+ * 绝不让设置页探测失败波及插件加载本身。
+ *
+ * @param ctx - 客户端插件上下文
+ * @param name - 服务名
+ * @returns 服务实例；不可用时为 undefined
+ */
+function optionalService(ctx: any, name: string): any {
+  try {
+    return ctx?.get?.(name) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 function namespacesOf(mirror: any): any[] {
   return (mirror?.getSnapshot?.().view?.namespaces ?? []) as any[]
 }
 
 /** C 代（≥ 0.1.7）适配器：configForms + describe 镜像。 */
 export function createFormsAdapter(ctx: any): SettingsScopeAdapter | undefined {
-  const forms = ctx?.configForms
-  if (forms === undefined || forms === null || typeof forms.get !== 'function') return undefined
+  // ⚠ 必须用 ctx.get('configForms')，**不能**写 ctx.configForms。
+  // cordis 的 Context 代理会对未在 inject 里声明的服务属性直接抛错
+  // （`cannot get property "configForms" without inject`），而不是返回 undefined；
+  // 本插件要同时兼容两代设置服务，不能把任一代写进 inject（写死任一个都会在另一代上
+  // 永远等不到服务而整个插件加载失败）。ctx.get() 对「存在但未 inject」返回服务本身、
+  // 对「不存在」返回 undefined，都不抛错 —— 这正是可选服务探测需要的语义。
+  const forms = optionalService(ctx, 'configForms')
+  if (forms === undefined || typeof forms.get !== 'function') return undefined
   const mirror = typeof forms.describe === 'function' ? forms.describe() : undefined
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of [...listeners]) listener() }
@@ -143,8 +168,9 @@ export function createFormsAdapter(ctx: any): SettingsScopeAdapter | undefined {
 
 /** A/B 代（≤ 0.1.6）适配器：settingsScope.bind。 */
 export function createLegacyAdapter(ctx: any): SettingsScopeAdapter | undefined {
-  const service = ctx?.settingsScope
-  if (service === undefined || service === null || typeof service.bind !== 'function') return undefined
+  // 同 createFormsAdapter：可选服务必须走 ctx.get()
+  const service = optionalService(ctx, 'settingsScope')
+  if (service === undefined || typeof service.bind !== 'function') return undefined
   const scope = service.bind({
     namespace: LEGACY_NAMESPACE,
     decode: (value: unknown) => (typeof value === 'object' && value !== null ? value as SettingsShape : undefined),

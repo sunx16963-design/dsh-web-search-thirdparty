@@ -153,7 +153,7 @@ export function buildConfigSchema(z: any, volatile: boolean): any {
   /** 抓取超时（ms）。 */
   fetchTimeoutMs: V(z.number().step(1000).min(1000).max(120000).default(15000)),
   /** 抓取 User-Agent。 */
-  fetchUserAgent: V(z.string().default('deepseek-harness-web-search-thirdparty/0.4.2')),
+  fetchUserAgent: V(z.string().default('deepseek-harness-web-search-thirdparty/0.4.3')),
   /** 网络层失败重试次数。 */
   retryCount: V(z.number().step(1).min(0).max(5).default(1)),
   /** 重试指数退避基数（ms）。 */

@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.4.3] - 2026-09-27
+
+**真正的病根**：`apply()` 访问了没有 `inject` 声明的服务属性，cordis 直接抛错 →
+客户端插件 fiber FAILED → 启动页 `Failed to load plugin dsh-web-search-thirdparty`。
+0.4.1 / 0.4.2 两次“修复”都没碰到这一层。
+
+### 根因（已用真实 cordis 复现并定位到源码行）
+- cordis 的 `ReflectService.handler.get`：对未在 `inject` 里声明的服务属性**抛错**
+  （`cannot get property "configForms" without inject`），**不是**返回 `undefined`。
+- 本插件要同时兼容两代设置服务（C 代 `configForms`、A/B 代 `settingsScope`），
+  因此 `inject` 只能声明 `['slots']`；而 `createFormsAdapter/createLegacyAdapter` 却用
+  **属性访问** `ctx.configForms` / `ctx.settingsScope` 做探测 → `apply()` 抛错 → fiber FAILED。
+  （0.4.0 的 `inject: ['slots','settingsScope']` 在旧代上不会抛错，所以这个坑是我 0.4.1
+  把 inject 收窄后才出现的。）
+- 正确写法：**`ctx.get(name)`**。实测对「存在但未 inject」返回服务本身、对「不存在」返回
+  `undefined`，都不抛错；`ctx.inject([name], cb)` 只适用于“服务出现即回调”，不适合同步探测。
+
+### Fixed
+- `src/client/scope.ts`：两代适配器一律改用 `ctx.get()` 探测（新增 `optionalService()`
+  再兜一层 try/catch，任何意外的抛错都退化为“服务不可用”）。
+- `src/client/index.ts`：`apply()` 对设置传输层探测加 try/catch —— 探测失败只让设置页只读，
+  **绝不允许**把整个客户端插件拖成 FAILED（那会让 profile 根本进不去）。
+
+### Added（补上真正能拦住这类问题的验证）
+- `tests/client-activation.test.ts`：用**真实 `@deepseek-ai/cordis`** 把 `lib/client.js`
+  当插件加载，断言 fiber 进入 ACTIVE（C 代 / A/B 代 / 两代都缺席三种情形），
+  并断言能注册 `settings.section`。只要 `apply()` 抛错，fiber 就会是 FAILED，测试立刻失败。
+  另含两条“根因锚点”用例：未 inject 的属性访问必须 FAILED、`ctx.get()` 必须不抛错 ——
+  防止以后有人把 `ctx.get()` 改回 `ctx.configForms`。
+- `tests/client-scope.test.ts` 的假上下文改为只暴露 `ctx.get()`，并新增
+  「只把服务挂成属性时探测不到」「`ctx.get()` 抛错时退化为不可用」两条不变量。
+
+### 为什么前两轮没发现（复盘）
+- 0.4.1 的 `tests/client-contract.test.ts` 只执行 bundle 的 **factory（materialize）**，
+  **从不调用 `apply()`**；端到端验证又只覆盖宿主半边。于是“能加载”被误判为“能用”。
+  本轮把「用真实 cordis 激活产物」补成常驻测试，并额外在隔离实例上对
+  **服务器实际下发**的单包产物与批次脚本各做了一次激活检查。
+
+### Verification（本次实测）
+| 检查对象 | fiber.state | settings.section |
+| --- | --- | --- |
+| 修复后·服务端下发单包产物 | 2 ACTIVE | 已注册 |
+| 修复前·服务端下发同位置产物 | 3 FAILED | 未注册 |
+| 修复后·浏览器实际下载的批次脚本（8 个模块） | 2 ACTIVE | 已注册 |
+- 全量测试 104 → 112，typecheck（宿主 + 客户端）/ build 通过。
+
 ## [0.4.2] - 2026-09-27
 
 修复 0.4.1 引入的**加载期事故**：客户端 bundle 少了 `exports.inject`，DSH 启动页直接报

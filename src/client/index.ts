@@ -555,7 +555,16 @@ function mountForm(container: HTMLElement, scope: SettingsScopeAdapter | undefin
 }
 
 export function apply(ctx: any): void {
-  const scope = createScopeAdapter(ctx)
+  let scope: SettingsScopeAdapter | undefined
+  try {
+    scope = createScopeAdapter(ctx)
+  } catch (error) {
+    // 纵深防御：设置传输层的探测失败**绝不能**让整个客户端插件加载失败 ——
+    // 那会让启动页直接报 “Failed to load plugin”，整个 profile 都进不去。
+    // 退化为「没有设置传输」：页面照常渲染，并明确提示无法保存。
+    ctx?.logger?.warn?.('[web-search-thirdparty] 设置传输层探测失败，设置页将只读：' + String(error))
+    scope = undefined
+  }
 
   function SettingsSection(): React.ReactElement {
     const ref = React.useRef<HTMLDivElement | null>(null)

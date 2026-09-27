@@ -45,25 +45,47 @@ function fakeForms(opts: {
     getSnapshot: () => ({ view }),
     subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn) },
   }
+  const service = { describe: () => mirror, get: (id: string) => (served.includes(id) ? form : undefined) }
+  return { mutations, service, ctx: ctxWith({ configForms: service }) }
+}
+
+/**
+ * 只暴露 `get(name)` 的假上下文 —— 与 cordis 一致：可选服务必须走 `ctx.get()`，
+ * 直接属性访问（ctx.configForms）会抛错，不能用来做跨代探测。
+ */
+function ctxWith(services: Record<string, any>) {
   return {
-    mutations,
-    ctx: { configForms: { describe: () => mirror, get: (id: string) => (served.includes(id) ? form : undefined) } },
+    get: (name: string) => services[name],
+    effect: (_fn: any) => () => {},
   }
 }
 
 describe('createScopeAdapter', () => {
   it('C 代优先于 A/B 代', () => {
-    const { ctx } = fakeForms()
+    const { service } = fakeForms()
     const fakeSettingsScope = { bind: () => { throw new Error('不该走旧路径') } }
-    const adapter = createScopeAdapter({ ...ctx, settingsScope: fakeSettingsScope })
+    const adapter = createScopeAdapter(ctxWith({ configForms: service, settingsScope: fakeSettingsScope }))
     expect(adapter).toBeDefined()
     expect(adapter!.served()).toBe(true)
   })
 
   it('两代服务都不在时返回 undefined（UI 据此禁用保存并说明原因）', () => {
-    expect(createScopeAdapter({})).toBeUndefined()
-    expect(createFormsAdapter({ configForms: {} })).toBeUndefined()
-    expect(createLegacyAdapter({ settingsScope: {} })).toBeUndefined()
+    expect(createScopeAdapter(ctxWith({}))).toBeUndefined()
+    expect(createFormsAdapter(ctxWith({ configForms: {} }))).toBeUndefined()
+    expect(createLegacyAdapter(ctxWith({ settingsScope: {} }))).toBeUndefined()
+  })
+
+  it('只把服务挂成属性（没有 ctx.get）时探测不到 —— 这正是不能写 ctx.configForms 的原因', () => {
+    // cordis 里 ctx.configForms 会抛 "cannot get property ... without inject"，
+    // 所以适配层只认 ctx.get()；这里锁住「不依赖属性访问」这个不变量。
+    const propertyOnly: any = { configForms: { get: () => undefined, describe: () => ({}) } }
+    expect(createFormsAdapter(propertyOnly)).toBeUndefined()
+  })
+
+  it('ctx.get() 抛错时退化为不可用，而不是让调用方炸掉', () => {
+    const hostile: any = { get: () => { throw new Error('cannot get property "configForms" without inject') } }
+    expect(createFormsAdapter(hostile)).toBeUndefined()
+    expect(createLegacyAdapter(hostile)).toBeUndefined()
   })
 })
 
@@ -129,7 +151,7 @@ describe('A/B 代（≤ 0.1.6）适配器', () => {
   it('按插件注册的 namespace 绑定，并把 set/unset 顺序发出去', async () => {
     const calls: any[] = []
     const bound: any[] = []
-    const ctx = {
+    const ctx = ctxWith({
       settingsScope: {
         bind: (spec: any) => {
           bound.push(spec)
@@ -141,7 +163,7 @@ describe('A/B 代（≤ 0.1.6）适配器', () => {
           }
         },
       },
-    }
+    })
     const adapter = createLegacyAdapter(ctx)!
     expect(bound[0].namespace).toBe(LEGACY_NAMESPACE)
     await adapter.mutate([
